@@ -33,7 +33,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(session({secret : process.env.PASSPORT_SECRET, resave : false, saveUninitialized : false}))
 app.use(passport.session())
 
-app.use('/', indexRouter);
 app.use("/api", APIRoutes)
 
 async function mongoDbConnection(){

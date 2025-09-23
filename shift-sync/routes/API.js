@@ -8,6 +8,7 @@ const MANAGER = require('../models/manager')
 const { manager_sign_up } = require('../controllers/managerController')
 const passport = require('passport')
 const { token } = require('morgan')
+const {testMail} = require('../controllers/sendMails')
 
 function authMiddleWare(req, res, next){
     const authHeader = req.headers['authorization']
@@ -33,5 +34,8 @@ router.get("/", (req, res, next)=>{
 
 router.post("/manager-sign-up", manager_sign_up)
 
+router.get("/staff-add", authMiddleWare)
+
+router.post('/send-mail',authMiddleWare, testMail)
 
 module.exports = router;
