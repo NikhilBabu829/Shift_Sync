@@ -6,6 +6,7 @@ const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 
 const { manager_sign_up, manager_invite } = require('../controllers/managerController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount } = require('../controllers/staffController')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
 
@@ -39,5 +40,10 @@ router.post('/send-mail',authMiddleWare, testMail)
 
 //staff routes
 
+router.get("/join/:id", checkAuthentication)
+
+router.get("/create-staff-acc/:id", simulatingUIForAccCreation)
+
+router.post("/create-staff-acc/:id", creatingStaffAccount)
 
 module.exports = router;
