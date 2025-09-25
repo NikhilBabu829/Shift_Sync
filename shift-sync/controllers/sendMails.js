@@ -20,7 +20,7 @@ exports.testMail = asyncHandler(async(req, res)=>{
             from : GMAIL,
             to : "nikhilbabu829@gmail.com",
             subject : "This is a sample mail",
-            text : "This here is a sample mail to so and so"
+            text : "This here is a sample mail to so and so",
         })
         if(mailService.accepted){
             return res.status(200).json({
@@ -35,5 +35,20 @@ exports.testMail = asyncHandler(async(req, res)=>{
         }
     }catch(err){
         res.send({"message" : "Failed to send the mail, please try again!", err})
+    }
+})
+
+exports.inviteMember = asyncHandler(async (data)=>{
+    try{
+        const mailService = await transporter.sendMail({
+            from : GMAIL,
+            to : data.to,
+            subject : data.subject,
+            text : data.text,
+            html : data.html
+        })
+        return mailService
+    }catch(err){
+        return err;
     }
 })
