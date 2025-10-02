@@ -42,8 +42,12 @@ router.post('/send-mail',authMiddleWare, testMail)
 
 router.get("/join/:id", checkAuthentication)
 
-router.get("/create-staff-acc/:id", simulatingUIForAccCreation)
+// router.get("/create-staff-acc/:id", simulatingUIForAccCreation)
 
-router.post("/create-staff-acc/:id", creatingStaffAccount)
+router.get("/create-staff-acc/:id", creatingStaffAccount)
+
+router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/'}), (req, res)=>{
+    res.redirect('/')
+})
 
 module.exports = router;

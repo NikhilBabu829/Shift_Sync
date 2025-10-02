@@ -6,6 +6,8 @@ const passport = require('passport')
 const asyncHandler = require('express-async-handler')
 const jwt = require('jsonwebtoken')
 
+const emailValidator = require('email-validator')
+
 const {inviteMember} = require('./sendMails')
 
 const { sendingToken } = require('../utils/mailHtmls') 
@@ -32,6 +34,7 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
 })
 
 exports.manager_invite = asyncHandler(async (req, res)=>{
+    const{ to, subject, text } = req.body
     try{
         const authHeader = req.headers['authorization']
         const token = authHeader && authHeader.split(" ")[1]
@@ -42,19 +45,21 @@ exports.manager_invite = asyncHandler(async (req, res)=>{
         await tokenEntry.save()
     
         const mailHTML = sendingToken(tokenEntry._id)
-    
-        const inviteResponse = await inviteMember({to : "nikhilbabu829@gmail.com", subject : "you've been invited to ...", text : "", html : mailHTML})
-        
-        if(inviteResponse.accepted && inviteResponse.accepted.length > 0){
-            return res.status(200).json({
-                message : "Mail sent successfully",
-                messageId : inviteResponse.messageId
-            })
-        }else{
-            return res.status(400).json({
-                message : "Mail was not accepted by the server please try again later",
-                messageId : inviteResponse.messageId
-            })
+
+        if(emailValidator.validate(to)){
+            const inviteResponse = await inviteMember({ to : to, subject : "you've been invited to ...", text : "", html : mailHTML })
+            
+            if(inviteResponse.accepted && inviteResponse.accepted.length > 0){
+                return res.status(200).json({
+                    message : "Mail sent successfully",
+                    messageId : inviteResponse.messageId
+                })
+            }else{
+                return res.status(400).json({
+                    message : "Mail was not accepted by the server please try again later",
+                    messageId : inviteResponse.messageId
+                })
+            }
         }
     }catch(err){
         res.status(400).json({
