@@ -46,8 +46,24 @@ router.get("/join/:id", checkAuthentication)
 
 router.get("/create-staff-acc/:id", creatingStaffAccount)
 
-router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/'}), (req, res)=>{
-    res.redirect('/')
+router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/'}), async (req, res)=>{
+    const {user} = req;
+    const staffAccount = await STAFF.findOne({google_id : user.id})
+    if(staffAccount){
+        console.log("You are already there bruh")
+    }else{
+        const staffAccount = new STAFF({
+            google_id : user.id,
+            email : user.emails[0].value,
+            staffName : user.displayName
+        })
+        await staffAccount.save()
+        const jsonToken = jwt.sign({id : staffAccount.id, email : staffAccount.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+        return res.status(200).json({
+            token : jsonToken,
+            staff : staffAccount
+        })
+    }
 })
 
 module.exports = router;

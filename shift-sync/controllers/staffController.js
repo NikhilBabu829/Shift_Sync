@@ -31,10 +31,11 @@ exports.creatingStaffAccount = asyncHandler(async (req, res, next)=>{
     if(tokenData){
         try{
             const payload = jwt.verify(tokenData.token, process.env.JWT_INVITE_SECRET)
+            console.log(payload)
             return passport.authenticate('google', {
                 scope : ['email', 'profile']
             })(req, res, next)
-        }catch(err){
+        }catch(err){    
             return res.status(401).json({
                 message : "You are unauthorized",
                 reason : err.name

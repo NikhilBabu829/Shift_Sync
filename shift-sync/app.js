@@ -60,26 +60,26 @@ passport.use("manager-local", new passportLocalStrategy({ usernameField : 'email
 }))
 
 passport.serializeUser((entity, done)=>{
-  done(null, {id : entity.id, type : entity.constructor.modelName})
+  if(entity.provider === "google"){
+    done(null, {google_id : entity.id, email : entity.emails[0].value, staffName : entity.displayName ,provider : true})
+  }else{
+    done(null, {id : entity.id, type : entity.constructor.modelName})
+  }
 })
 
 passport.deserializeUser(async (obj, done)=>{
   try{
-    const Model = obj.type === "Manager" ? MANAGER : STAFF
-    const person = await Model.findById(obj.id)
-    return done(null, person)
+    if(obj.provider){
+      
+    }else{
+      const Model = obj.type === "Manager" ? MANAGER : STAFF
+      const person = await Model.findById(obj.id)
+      return done(null, person)
+    }
   }
   catch(err){
     done(err)
   }
-})
-
-passport.serializeUser(function(user, done){
-  done(null, user)
-})
-
-passport.deserializeUser(function(user, done){
-  done(null, user)
 })
 
 passport.use(new google({
@@ -88,8 +88,7 @@ passport.use(new google({
     callbackURL : process.env.GOOGLE_CALLBACK_URL,
     passReqToCallback : true
   },
-  function(req, accessToken, refreshToken, profile, done){
-    console.log(profile)
+  async (req, accessToken, refreshToken, profile, done)=>{
     return done(null, profile)
   }
 ))
