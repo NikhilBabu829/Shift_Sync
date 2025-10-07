@@ -5,4 +5,4 @@ const TokenSignSchema = new Schema({
     token : { type : String, require : true }
 })
 
-module.exports = mongoose.model('Token', TokenSignSchema)
+module.exports = mongoose.model('ManagerInviteToken', TokenSignSchema)

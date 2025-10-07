@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken')
 
 const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
+const MANAGERINVITETOKEN = require('../models/tokenSign')
 
 const { manager_sign_up, manager_invite } = require('../controllers/managerController')
 const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount } = require('../controllers/staffController')
@@ -24,7 +25,7 @@ function authMiddleWare(req, res, next){
 //manager routes
 router.post("/manager-login", passport.authenticate("manager-local", {session : false}), (req, res)=>{
     const manager = req.user
-    const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '6h'})
+    const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
     return res.json({token, manager})
 })
 
@@ -49,6 +50,7 @@ router.get("/create-staff-acc/:id", creatingStaffAccount)
 router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/'}), async (req, res)=>{
     const {user} = req;
     const staffAccount = await STAFF.findOne({google_id : user.id})
+    const managerToken_id = req.query.state
     if(staffAccount){
         console.log("You are already there bruh")
     }else{
@@ -59,6 +61,9 @@ router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/
         })
         await staffAccount.save()
         const jsonToken = jwt.sign({id : staffAccount.id, email : staffAccount.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+        if(jsonToken.length > 0){
+            const deletion = await MANAGERINVITETOKEN.findByIdAndDelete(managerToken_id)
+        }
         return res.status(200).json({
             token : jsonToken,
             staff : staffAccount
