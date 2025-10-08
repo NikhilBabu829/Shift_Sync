@@ -7,7 +7,7 @@ const MANAGER = require('../models/manager')
 const MANAGERINVITETOKEN = require('../models/tokenSign')
 
 const { manager_sign_up, manager_invite } = require('../controllers/managerController')
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount } = require('../controllers/staffController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap } = require('../controllers/staffController')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
 
@@ -41,9 +41,30 @@ router.post('/send-mail',authMiddleWare, testMail)
 
 //staff routes
 
+router.get("/staff",authMiddleWare ,getListOfAllStaffMembers)
+
+router.post("/initiate-swap", authMiddleWare, initiateSwap)
+
 router.get("/join/:id", checkAuthentication)
 
 // router.get("/create-staff-acc/:id", simulatingUIForAccCreation)
+
+router.get("/staff-login", passport.authenticate('google', {failureRedirect : "/", scope : ['email', 'profile']}), async(req, res)=>{
+    try{
+        const {user} = req;
+        const staffAccount = await STAFF.findOne({google_id : user.id})
+        if(staffAccount){
+            const loginToken = jwt.sign({id : staffAccount.id, email : staffAccount.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+            return res.status(200).json({
+                token : loginToken,
+                staff : staffAccount
+            })
+        }else{
+        }
+    }catch(err){
+        console.log(err)
+    }
+})
 
 router.get("/create-staff-acc/:id", creatingStaffAccount)
 
@@ -52,9 +73,14 @@ router.get('/redirectURI', passport.authenticate('google', {failureRedirect : '/
     const staffAccount = await STAFF.findOne({google_id : user.id})
     const managerToken_id = req.query.state
     if(staffAccount){
-        console.log("You are already there bruh")
+        const loginToken = jwt.sign({id : staffAccount.id, email : staffAccount.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+        const deletion = await MANAGERINVITETOKEN.findByIdAndDelete(managerToken_id)
+        return res.status(200).json({
+            token : loginToken,
+            staff : staffAccount
+        })
     }else{
-        const staffAccount = new STAFF({
+        const staffAccount = new STAFF({ 
             google_id : user.id,
             email : user.emails[0].value,
             staffName : user.displayName

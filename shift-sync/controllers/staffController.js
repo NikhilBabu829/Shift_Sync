@@ -42,3 +42,24 @@ exports.creatingStaffAccount = asyncHandler(async (req, res, next)=>{
         }
     }
 })
+
+exports.getListOfAllStaffMembers = asyncHandler(async (req, res)=>{
+    try{
+        const staffMembers = await STAFF.find()
+        res.status(200).json({
+            staffMembers : [staffMembers]
+        })
+    }catch(err){
+        res.status(401).json({
+            message : "You are unauthorized",
+            error : err
+        })
+    }
+})
+
+exports.initiateSwap = asyncHandler(async (req, res)=>{
+    const data = req.body
+    console.log(new Date().toLocaleTimeString())
+})
+
+
