@@ -7,7 +7,7 @@ const MANAGER = require('../models/manager')
 const MANAGERINVITETOKEN = require('../models/tokenSign')
 
 const { manager_sign_up, manager_invite } = require('../controllers/managerController')
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap } = require('../controllers/staffController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts } = require('../controllers/staffController')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
 
@@ -46,6 +46,8 @@ router.get("/staff",authMiddleWare ,getListOfAllStaffMembers)
 router.post("/initiate-swap", authMiddleWare, initiateSwap)
 
 router.get("/join/:id", checkAuthentication)
+
+router.get("/staffB-accepts/:id", authMiddleWare, staffBAccepts)
 
 // router.get("/create-staff-acc/:id", simulatingUIForAccCreation)
 

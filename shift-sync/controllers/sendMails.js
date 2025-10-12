@@ -52,3 +52,45 @@ exports.inviteMember = asyncHandler(async (data)=>{
         return err;
     }
 })
+
+exports.swapInitiate = asyncHandler(async (data)=>{
+    try{
+        const mailService = await transporter.sendMail({
+            from : GMAIL,
+            to : data.to,
+            subject : `Shift Swap Request from ${data.belongsToStaffName} on ${data.date} from ${data.shift_start_time} till ${data.shift_end_time}`,
+            html : data.bodyHTML
+        })
+        return mailService
+    }catch(err){
+        return err;
+    }
+})
+
+exports.staffConfirmationEmail = asyncHandler(async (data)=>{
+    try{
+        const mailService = await transporter.sendMail({
+            from : GMAIL,
+            to : data.to,
+            subject : `Your Shift Swap Confirmation Has Been Sent to the Manager, ${data.id}`,
+            html : data.bodyHTML
+        })
+        return mailService
+    }catch(err){
+        return err;
+    }
+})
+
+exports.swapForwardToManagerEmail = asyncHandler(async (data)=>{
+    try{
+        const mailService = await transporter.sendMail({
+            from : GMAIL,
+            to : data.to,
+            subject : `Shift Swap Request Pending Your Approval — ${data.belongs_to} ⇄ ${data.swap_belongs_to}`,
+            html : data.bodyHTML
+        })
+        return mailService
+    }catch(err){
+        return err;
+    }
+})
