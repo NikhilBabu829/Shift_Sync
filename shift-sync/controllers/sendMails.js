@@ -94,3 +94,18 @@ exports.swapForwardToManagerEmail = asyncHandler(async (data)=>{
         return err;
     }
 })
+
+exports.managerConfirmationEmail = asyncHandler(async (data)=>{
+    console.log(data)
+    try{
+        const mailService = await transporter.sendMail({
+            from : GMAIL,
+            to : data.to,
+            subject : `Shift Swap Request Has Been Approved — ${data.to.staffName} ⇄ ${data.staffB.staffName}`,
+            html : data.bodyHTML
+        })
+        return mailService
+    }catch(err){
+        return err;
+    }
+})

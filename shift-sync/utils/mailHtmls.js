@@ -24,7 +24,7 @@ function sendingToken(token){
               </tr>
               <tr>
                 <td align="center" style="padding: 20px;">
-                  <a href=http://localhost:3000/api/join/${token}
+                  <a href=http://localhost:3000/api/create-staff-acc/${token}
                     style="background-color: #007BFF; color: #ffffff; padding: 12px 24px; 
                             text-decoration: none; border-radius: 5px; font-size: 16px; 
                             display: inline-block;">
@@ -236,7 +236,7 @@ function emailReviewToManager(data){
         </p>
 
         <div style="text-align:center; margin:25px 0;">
-          <a href="{{approve_link}}"
+          <a href="http://localhost:3000/api/swap-final-approval/${data.id}"
             style="background-color:#28a745; color:white; text-decoration:none; padding:12px 24px; border-radius:6px; font-weight:bold; margin-right:10px;">
             ✅ Approve Swap
           </a>
@@ -331,4 +331,64 @@ function staffAConfirmationMail(data){
   `
 }
 
-module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, staffAConfirmationMail }
+function managerConfirmationMail(data){
+  return `
+    <!DOCTYPE html>
+  <html lang="en">
+    <body style="font-family: Arial, sans-serif; background-color:#f8f9fa; padding:20px; color:#333;">
+      <div style="max-width:650px; margin:auto; background:#fff; padding:25px; border-radius:10px;">
+        <h2 style="color:#2a6df4; margin-top:0;">Shift Swap Approved ✅</h2>
+
+        <p>Hi <strong>${data.to.staffName}</strong>,</p>
+
+        <p>
+          Your shift swap request between <strong>${data.to.staffName}</strong> and <strong>${data.staffB.staffName}</strong>
+          has been <span style="color:green;"><strong>approved</strong></span> by your manager.
+        </p>
+
+        <h3 style="margin:20px 0 10px;">Final Swap Details</h3>
+        <table style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr style="background:#eef3ff;">
+              <th style="text-align:left; padding:10px; border:1px solid #ddd;">Staff Member</th>
+              <th style="text-align:left; padding:10px; border:1px solid #ddd;">New Shift</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:10px; border:1px solid #ddd;"><strong>${data.to.staffName}</strong></td>
+              <td style="padding:10px; border:1px solid #ddd;">
+                ${data.shiftDetails.swapDate} — ${data.shiftDetails.swap_shift_start_time} to ${data.shiftDetails.swap_shift_end_time}<br>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:10px; border:1px solid #ddd;"><strong>${data.staffB.staffName}</strong></td>
+              <td style="padding:10px; border:1px solid #ddd;">
+                ${data.shiftDetails.date} — ${data.shiftDetails.shift_start_time} to ${data.shiftDetails.shift_end_time}<br>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h4 style="margin:0 0 8px;">Summary</h4>
+        <ul style="margin:0 0 20px 18px; padding:0;">
+          <li>Manager: <strong>${data.manager_name}</strong> has approved your swap.</li>
+          <li>Shift changes have been applied automatically.</li>
+          <li>You’ll receive reminders for your new shift timings as usual.</li>
+        </ul>
+
+        <p style="margin-top:20px;">Thanks for keeping your team coordinated,<br>
+        <strong>Shift-Sync Team</strong></p>
+
+        <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
+        <small style="color:#777;">
+          This is an automated message from Shift-Sync.  
+          Please do not reply directly.
+        </small>
+      </div>
+    </body>
+  </html>
+  `
+}
+
+module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, managerConfirmationMail, staffAConfirmationMail }

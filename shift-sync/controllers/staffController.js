@@ -18,7 +18,7 @@ exports.checkAuthentication = asyncHandler(async(req, res)=>{
 
     if(tokenData){
         jwt.verify(tokenData.token, process.env.JWT_INVITE_SECRET, (err, user)=>{
-            if(err) return res.status(401).json({message : "You are unauthorized/restricted to view this site"})
+            if(err) return res.status(401).json({message : "You are unauthorized/restricted to view this site", err : err})
             res.redirect(`http://localhost:3000/api/create-staff-acc/${id}`)
         })
     }
