@@ -28,18 +28,19 @@ app.set('view engine', 'ejs');
 const MANAGER = require('./models/manager')
 const STAFF = require('./models/staff')
 
-app.use(logger('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(session({secret : process.env.PASSPORT_SECRET, resave : false, saveUninitialized : false}))
-app.use(passport.session())
-
 app.use(cors({
   origin : "http://localhost:5173",
   credentials : true
 }))
+
+app.use(cookieParser());
+app.use(session({secret : process.env.PASSPORT_SECRET, resave : false, saveUninitialized : false}))
+app.use(passport.initialize())
+app.use(passport.session())
+app.use(logger('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.use("/api", APIRoutes)
 

@@ -50,8 +50,10 @@ exports.creatingStaffAccount = asyncHandler(async (req, res, next)=>{
 exports.getListOfAllStaffMembers = asyncHandler(async (req, res)=>{
     try{
         const staffMembers = await STAFF.find()
+        const user = await STAFF.findById(req.user.id)
         res.status(200).json({
-            staffMembers : [staffMembers]
+            staffMembers : staffMembers,
+            user : user
         })
     }catch(err){
         res.status(401).json({
@@ -70,20 +72,17 @@ exports.getListOfAllStaffMembers = asyncHandler(async (req, res)=>{
 
 exports.initiateSwap = asyncHandler(async (req, res)=>{
     try{
-        const { date, shift_start_time, shift_end_time, shift_length } = req.body
-        const { swap_date, swap_belongs_to, swap_shift_start_time, swap_shift_end_time, swap_shift_length } = req.body
+        const { date, shift_start_time, shift_end_time, shift_length, swap_date, swap_belongs_to, swap_shift_start_time, swap_shift_end_time, swap_shift_length } = req.body
         const belongs_to = await STAFF.findById(req.user.id)
         const swapStaff = await STAFF.findById(swap_belongs_to)
-        
-        const inDateFormat = new Date(date)
-        const swapInDateFormat = new Date(swap_date)
+
         const shiftData = new SHIFT({
-            date : inDateFormat,
-            belongs_to : belongs_to.id,
+            date : date,
+            belongs_to : belongs_to._id,
             shift_start_time : shift_start_time,
             shift_end_time : shift_end_time,
-            swapDate : swapInDateFormat,
-            swap_belongs_to : swapStaff.id,
+            swapDate : swap_date,
+            swap_belongs_to : swapStaff._id,
             swap_shift_start_time : swap_shift_start_time,
             swap_shift_end_time : swap_shift_end_time
         })
@@ -96,7 +95,7 @@ exports.initiateSwap = asyncHandler(async (req, res)=>{
         if(swapInitiateResponse.accepted && swapInitiateResponse.accepted.length > 0){
             return res.status(200).json({
 
-                message : "Mail sent successfully",
+                message : `Mail sent successfully to ${swapStaff.email}`,
                 messageId : swapInitiateResponse.messageId
             })
         }else{

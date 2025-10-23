@@ -36,6 +36,7 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
 })
 
 exports.manager_invite = asyncHandler(async (req, res)=>{
+    console.log("Manager Invite has begun")
     const{ to, subject, text } = req.body
     try{
         const authHeader = req.headers['authorization']
