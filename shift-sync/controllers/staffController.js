@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken')
 const passport = require('passport')
 const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfirmationMail } = require('../utils/mailHtmls')
 const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail } = require('./sendMails')
+const clockIn = require('../models/clockIn')
 
 const google = require('passport-google-oauth20').Strategy;
 
@@ -175,3 +176,35 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
     }
 })
 
+exports.staffClockIn = asyncHandler(async (req, res)=>{
+    try{
+        const something = req.body
+        const dataEntry = new clockIn({
+            staffMember : req.user.id,
+            startOfShift : something.startOfShift,
+            endOfShift : something.endOfShift,
+            timeClockedIn : something.timeClockedIn,
+            dateClockedIn : something.dateClockedIn,
+            isLate : something.isLate
+        })
+        await dataEntry.save()
+        if(dataEntry){
+            const currentUser = await STAFF.findByIdAndUpdate(req.user.id, {$push : {clock_In_Details : dataEntry._id}}, {new : true})
+            console.log(currentUser)
+        }
+        return res.status(200).json({
+            msg : "Your Clock-in has been accepted"
+        })
+    }catch(err){
+        console.log(err)
+        return res.status(400).json(err)
+    }
+})
+
+exports.staffClockOut = asyncHandler(async (req, res)=>{
+    try{
+        const someData = req.body
+    }catch(err){
+
+    }
+})

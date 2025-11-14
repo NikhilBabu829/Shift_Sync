@@ -7,7 +7,7 @@ const MANAGER = require('../models/manager')
 const TOKEN = require("../models/tokenSign")
 
 const { manager_sign_up, manager_invite, swapFinalApproval } = require('../controllers/managerController')
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts } = require('../controllers/staffController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut } = require('../controllers/staffController')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
 
@@ -84,6 +84,10 @@ router.get("/staffB-accepts/:id", staffAuthenticationWithCookies, staffBAccepts)
 router.get("/create-staff-acc/:id", creatingStaffAccount)
 
 router.get("/staff-login", passport.authenticate("google", {scope : ['profile', 'email']}))
+
+router.post("/staff-clock-in", staffAuthenticationWithCookies, staffClockIn)
+
+router.post("/staff-clock-out", staffAuthenticationWithCookies, staffClockOut)
 
 router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "http://localhost:5173/staff-login"}),async (req, res, next)=>{
     try{
