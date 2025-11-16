@@ -6,7 +6,8 @@ const StaffSchema = new Schema({
     email : {type : String},
     staffName : {type : String},
     profile_picture : {type : String},
-    clock_In_Details : [{type : Schema.Types.ObjectId, ref : "ClockIn"}]
+    clock_In_Details : [{type : Schema.Types.ObjectId, ref : "ClockIn"}],
+    cloclk_Out_Details : [{type : Schema.Types.ObjectId, ref : "ClockOut"}]
 })
 
 module.exports = mongoose.model('Staff', StaffSchema);

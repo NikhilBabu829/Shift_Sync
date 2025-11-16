@@ -10,6 +10,7 @@ const passport = require('passport')
 const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfirmationMail } = require('../utils/mailHtmls')
 const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail } = require('./sendMails')
 const clockIn = require('../models/clockIn')
+const clockOut = require('../models/clockOut')
 
 const google = require('passport-google-oauth20').Strategy;
 
@@ -204,7 +205,25 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
 exports.staffClockOut = asyncHandler(async (req, res)=>{
     try{
         const someData = req.body
-    }catch(err){
-
+        const dataEntry = new clockOut({
+            staffMember : req.user.id,
+            startOfShift : someData.startOfShift,
+            endOfShift : someData.endOfShift,
+            timeClockedOut : someData.timeClockedOut,
+            dateClockedOut : someData.dateClockedOut,
+            isLate : someData.isLate
+        })
+        await dataEntry.save()
+        if(dataEntry){
+            const currentUser = await STAFF.findByIdAndUpdate(req.user.id, {$push : {cloclk_Out_Details : dataEntry._id}}, {new : true})
+            console.log(currentUser)
+        }
+        return res.status(200).json({
+            msg : "Your Clock-out has been accepted"
+        })
+    }
+    catch(err){
+        console.log(err)
+        return res.status(400).json(err)
     }
 })
