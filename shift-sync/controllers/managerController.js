@@ -2,11 +2,15 @@
 const MANAGER = require('../models/manager')
 const SHIFT = require('../models/shift')
 const STAFF = require("../models/staff")
+const CLOCKOUT = require("../models/clockOut")
+const CLOCKIN = require("../models/clockIn")
 const TOKEN = require('../models/tokenSign')
 const bcrypt = require('bcryptjs')
 const passport = require('passport')
 const asyncHandler = require('express-async-handler')
 const jwt = require('jsonwebtoken')
+
+const ExcelJS = require('exceljs')
 
 const emailValidator = require('email-validator')
 
@@ -112,3 +116,42 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
     }
 })
 
+exports.download_attendance = asyncHandler(async (req, res)=>{
+
+    try{
+        const allStaffMembers = await STAFF.find()
+    
+        const allClockInDetails = await CLOCKIN.find().populate('staffMember', 'staffName email').lean()
+    
+        const allClockOutDetails = await CLOCKOUT.find().populate('staffMember', 'staffName email').lean()
+    
+        const workBook = new ExcelJS.Workbook()
+        workBook.creator = 'Shift Sync Server'
+        workBook.created = new Date()
+    
+        const staffSheet = workBook.addWorksheet('Staff Members')
+    
+        let clockInData = {}
+    
+        staffSheet.columns = [
+            {header : "Staff Name", key : "staffName", width : 30},
+            ...allClockInDetails.map((clockIn, index)=>(
+                {header : `${clockIn.dateClockedIn}`, key : `in_${index}`, width : 20}
+            ))
+        ]
+        
+    
+        res.setHeader(
+          'Content-Type',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        res.setHeader(
+          'Content-Disposition',
+          'attachment; filename="attendance_export.xlsx"'
+        )
+        await workBook.xlsx.write(res)
+        res.end()
+    }catch(err){
+        console.log(err)
+    }
+})

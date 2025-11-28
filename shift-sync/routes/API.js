@@ -6,7 +6,7 @@ const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 const TOKEN = require("../models/tokenSign")
 
-const { manager_sign_up, manager_invite, swapFinalApproval } = require('../controllers/managerController')
+const { manager_sign_up, manager_invite, swapFinalApproval, download_attendance } = require('../controllers/managerController')
 const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut } = require('../controllers/staffController')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
@@ -43,6 +43,9 @@ async function staffAuthenticationWithCookies(req, res, next){
 }
 
 //manager routes
+
+router.get("/download-attendance", download_attendance)
+
 router.post("/manager-login", passport.authenticate("manager-local", {session : false}), (req, res)=>{
     const manager = req.user
     const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
