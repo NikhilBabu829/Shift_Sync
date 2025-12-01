@@ -46,11 +46,32 @@ async function staffAuthenticationWithCookies(req, res, next){
 
 router.get("/download-attendance", download_attendance)
 
-router.post("/manager-login", passport.authenticate("manager-local", {session : false}), (req, res)=>{
-    const manager = req.user
-    const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
-    return res.json({token, manager})
+router.post("/manager-login", (req, res, next)=>{
+    console.log("Well here at the start")
+    passport.authenticate("manager-local", {session : false}, (err, user, info)=>{
+        if(err){
+            return res.status(500).json({message : "Server error please try again"})
+        }
+        if(!user){
+            return res.status(400).json({message : "please check the email and password, and try again!"})
+        }
+        const token = jwt.sign({id : user.id, email : user.email}, process.env.JWT_SECRET, {expiresIn : "24h"})
+        return res.json({token, manager : req.user})
+    })(req, res, next)
 })
+
+// router.post("/manager-login", passport.authenticate("manager-local", {session : false}), (err, user, info)=>{
+//     (req, res)=>{
+//         try{
+//             const manager = req.user
+//             const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+//             return res.json({token, manager})
+//         }catch(err){
+//             console.log("error from here")
+//             console.log(err);
+//         }
+//     } 
+// })
 
 router.get("/", (req, res, next)=>{
     res.send("connected")

@@ -122,8 +122,12 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         const allStaffMembers = await STAFF.find()
     
         const allClockInDetails = await CLOCKIN.find().populate('staffMember', 'staffName email').lean()
+
+        const gettingOnlyClockInDates = await CLOCKIN.distinct('dateClockedIn')
     
         const allClockOutDetails = await CLOCKOUT.find().populate('staffMember', 'staffName email').lean()
+
+        console.log(gettingOnlyClockInDates)
     
         const workBook = new ExcelJS.Workbook()
         workBook.creator = 'Shift Sync Server'
@@ -132,14 +136,16 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         const staffSheet = workBook.addWorksheet('Staff Members')
     
         let clockInData = {}
+
+        // ...allClockInDetails.map((clockIn, index)=>(
+        //     {header : `${clockIn.dateClockedIn}`, key : `in_${index}`, width : 20}
+        // ))
     
         staffSheet.columns = [
             {header : "Staff Name", key : "staffName", width : 30},
-            ...allClockInDetails.map((clockIn, index)=>(
-                {header : `${clockIn.dateClockedIn}`, key : `in_${index}`, width : 20}
-            ))
+            ...gettingOnlyClockInDates.map((clockIn, index)=>(
+                {header : `${clockIn}`, key : `in_${index}`, width : 20}))
         ]
-        
     
         res.setHeader(
           'Content-Type',

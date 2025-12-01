@@ -14,7 +14,6 @@ var indexRouter = require('./routes/index');
 const APIRoutes = require('./routes/API')
 
 var app = express();
-
 const mongoose = require('mongoose')
 
 const cors = require('cors')
@@ -53,17 +52,23 @@ mongoDbConnection().catch((err)=>{console.log(err)})
 
 passport.use("manager-local", new passportLocalStrategy({ usernameField : 'email', passwordField : 'password'}, async (email, pass, done)=>{
   try{
+    console.log("Entered the manager-local")
     const manager = await MANAGER.findOne({email : email})
     if(!manager){
+      console.log("no user found")
       return done(null, false, {message : "Username is incorrect"})
     }
+    console.log("user found")
     const match  = await bcrypt.compare(pass, manager.password)
     if(!match){
+      console.log("password incorrect")
       return done(null, false, {message : "Password is incorrect"})
     }
+    console.log("everything good in the manager-local")
     return done(null, manager)
   }
   catch(err){
+    console.log("inside the catch for manger-local")
     return done(err)
   }
 }))
