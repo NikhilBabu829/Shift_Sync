@@ -56,7 +56,7 @@ router.post("/manager-login", (req, res, next)=>{
             return res.status(400).json({message : "please check the email and password, and try again!"})
         }
         const token = jwt.sign({id : user.id, email : user.email}, process.env.JWT_SECRET, {expiresIn : "24h"})
-        return res.json({token, manager : req.user})
+        return res.json({token, manager : user})
     })(req, res, next)
 })
 
@@ -145,13 +145,15 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
                             profile_picture : user.photos?.[0]?.value
                         })
                         await newUser.save()
-
                         const newUserToken = jwt.sign({id : newUser.id, email : newUser.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
                         const topLevelToken = jwt.sign({newUserToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
                         if(newUserToken.length > 0){
                             const deletion = await TOKEN.findByIdAndDelete(state)
                         }
-                        return res.status(200).json({token : topLevelToken})
+                        const tokenInURL = new URLSearchParams({
+                            token : topLevelToken
+                        })
+                        return res.redirect(`http://localhost:5173/staff-login?${tokenInURL}`)
                         // return res.cookie('auth', newUserToken, {
                         //     httpOnly : true,
                         //     sameSite : 'lax',

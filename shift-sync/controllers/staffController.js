@@ -68,7 +68,7 @@ exports.getListOfAllStaffMembers = asyncHandler(async (req, res)=>{
 /**
  * 
  *     const allManagers = await MANAGER.find()
-    const randomManager = Math.random().toFixed(0) * (allManagers.length - 1)
+ *     const randomManager = Math.random().toFixed(0) * (allManagers.length - 1)
  * 
  */
 
