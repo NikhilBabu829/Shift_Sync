@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken')
 const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 const TOKEN = require("../models/tokenSign")
+const CLCOKIN = require("../models/clockIn")
 
 const { manager_sign_up, manager_invite, swapFinalApproval, download_attendance } = require('../controllers/managerController')
 const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut } = require('../controllers/staffController')
@@ -26,11 +27,13 @@ function authMiddleWare(req, res, next){
 
 async function staffAuthenticationWithCookies(req, res, next){
     let actualToken = '';
+    const urlToken = req.query.token;
     const token = req.cookies?.auth;
     const authHeader = req.headers['authorization']
     const authToken = authHeader && authHeader.split(" ")[1]
     if(token != undefined && token.length > 0){actualToken = token}
     if(authToken != undefined && authToken.length > 0){actualToken = authToken}
+    if(urlToken != undefined && urlToken.length > 0){actualToken = urlToken}
     if( actualToken.length == 0 ) return res.status(401).json({message : "Unauthorized"})
     try{
         const topLevelToken = jwt.verify(actualToken, process.env.ROOT_SECRET_PASS)
@@ -47,7 +50,6 @@ async function staffAuthenticationWithCookies(req, res, next){
 router.get("/download-attendance", download_attendance)
 
 router.post("/manager-login", (req, res, next)=>{
-    console.log("Well here at the start")
     passport.authenticate("manager-local", {session : false}, (err, user, info)=>{
         if(err){
             return res.status(500).json({message : "Server error please try again"})
@@ -59,19 +61,6 @@ router.post("/manager-login", (req, res, next)=>{
         return res.json({token, manager : user})
     })(req, res, next)
 })
-
-// router.post("/manager-login", passport.authenticate("manager-local", {session : false}), (err, user, info)=>{
-//     (req, res)=>{
-//         try{
-//             const manager = req.user
-//             const token = jwt.sign({id : manager.id, email : manager.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
-//             return res.json({token, manager})
-//         }catch(err){
-//             console.log("error from here")
-//             console.log(err);
-//         }
-//     } 
-// })
 
 router.get("/", (req, res, next)=>{
     res.send("connected")
@@ -95,6 +84,20 @@ router.get("/manager-auth", authMiddleWare, async (req, res)=>{
 router.get("/staff-auth", staffAuthenticationWithCookies, async (req, res)=>{
     const userDetails = await STAFF.findById(req.user.id)
     return res.status(200).json({message : "Good to go", user : userDetails})
+})
+
+router.get("/see-staff/:id", staffAuthenticationWithCookies, async (req, res)=>{
+    try{
+        console.log(req.params.id)
+        const staffMember = await STAFF.findById(req.params.id)
+        if(staffMember){
+            return res.status(200).json({staff : staffMember})
+        }else{
+            return res.status(404).json({message : "Staff member not found"})
+        }
+    }catch(err){
+        return res.status(500).json({message : "Server error"})
+    }
 })
 
 router.get("/staff",staffAuthenticationWithCookies ,getListOfAllStaffMembers)
@@ -125,13 +128,6 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
                 token : topLevelToken
             })
             return res.redirect(`http://localhost:5173/staff-login?${tokenInURl}`)
-            // res.cookie('auth', loginToken, {
-            //     httpOnly : true,
-            //     sameSite : 'lax',
-            //     path : "/",
-            //     secure : false,
-            //     maxAge : 86400000
-            // }).redirect("http://localhost:5173/dashboard")
         }else if(state != undefined){
             console.log(user)
             const managerToken = await TOKEN.findById(state)
@@ -145,22 +141,15 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
                             profile_picture : user.photos?.[0]?.value
                         })
                         await newUser.save()
-                        const newUserToken = jwt.sign({id : newUser.id, email : newUser.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
-                        const topLevelToken = jwt.sign({newUserToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
-                        if(newUserToken.length > 0){
+                        const loginToken = jwt.sign({id : newUser.id, email : newUser.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+                        const topLevelToken = jwt.sign({loginToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
+                        if(loginToken.length > 0){
                             const deletion = await TOKEN.findByIdAndDelete(state)
                         }
                         const tokenInURL = new URLSearchParams({
                             token : topLevelToken
                         })
                         return res.redirect(`http://localhost:5173/staff-login?${tokenInURL}`)
-                        // return res.cookie('auth', newUserToken, {
-                        //     httpOnly : true,
-                        //     sameSite : 'lax',
-                        //     path : "/",
-                        //     secure : false,
-                        //     maxAge : 86400000
-                        // }).redirect("http://localhost:5173/dashboard")
                     }else{
                         const msg= new URLSearchParams({
                             error : "You are Not Permitted to do that!"
@@ -182,6 +171,22 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
             error : err
         }).toString()
         return res.redirect(`http://localhost:5173/staff-login?${msg}`)
+    }
+})
+
+// clockIn and clockOut routes
+
+router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=>{
+    console.log("Fetching clockIn record")
+    try{
+        const clockInRecord = await CLCOKIN.findById(req.params.id)
+        console.log(clockInRecord)
+        if(!clockInRecord){
+            return res.status(404).json({message : "ClockIn record not found"})
+        }
+        return res.status(200).json({clockInRecord})
+    }catch(err){
+        return res.status(500).json({message : "Server error"})
     }
 })
 

@@ -35,7 +35,9 @@ exports.creatingStaffAccount = asyncHandler(async (req, res, next)=>{
     const tokenData = await TOKEN.findById(id)
     if(tokenData){
         try{
+            console.log("create account called")
             const payload = jwt.verify(tokenData.token, process.env.JWT_INVITE_SECRET)
+            console.log("payload created", payload)
             return passport.authenticate('google', {
                 scope : ['email', 'profile'],
                 state : id
