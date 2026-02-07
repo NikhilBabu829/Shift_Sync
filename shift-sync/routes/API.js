@@ -190,4 +190,14 @@ router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=
     }
 })
 
+router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req, res)=>{
+    console.log("Fetching all clockIn records of staff member")
+    try{
+        const clockInRecordsOfStaff = await CLCOKIN.find({staffMember : req.params.id})
+        return res.status(200).json(clockInRecordsOfStaff)
+    }catch(err){
+        return res.status(500).json({message : "Server error"})
+    }
+})
+
 module.exports = router;
