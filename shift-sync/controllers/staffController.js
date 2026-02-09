@@ -191,6 +191,16 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
             isLate : something.isLate
         })
         await dataEntry.save()
+        console.log(dataEntry)
+        if(dataEntry){
+            const newClockOut = new clockOut({
+                staffMember : req.user.id,
+                clockInRecord : dataEntry._id,
+                startOfShift : something.startOfShift,
+                endOfShift : something.endOfShift
+            })
+            await newClockOut.save()
+        }
         if(dataEntry){
             const currentUser = await STAFF.findByIdAndUpdate(req.user.id, {$push : {clock_In_Details : dataEntry._id}}, {new : true})
             console.log(currentUser)

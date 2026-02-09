@@ -177,10 +177,8 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
 // clockIn and clockOut routes
 
 router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=>{
-    console.log("Fetching clockIn record")
     try{
         const clockInRecord = await CLCOKIN.findById(req.params.id)
-        console.log(clockInRecord)
         if(!clockInRecord){
             return res.status(404).json({message : "ClockIn record not found"})
         }
@@ -191,7 +189,6 @@ router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=
 })
 
 router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req, res)=>{
-    console.log("Fetching all clockIn records of staff member")
     try{
         const clockInRecordsOfStaff = await CLCOKIN.find({staffMember : req.params.id})
         return res.status(200).json(clockInRecordsOfStaff)

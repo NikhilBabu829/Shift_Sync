@@ -3,6 +3,7 @@ const Schema = mongoose.Schema
 
 const ClockOutSchema = new Schema({
     staffMember : {type : Schema.Types.ObjectId, ref : "Staff", required : true},
+    clockInRecord : {type : Schema.Types.ObjectId, ref : "ClockIn", required : true},
     startOfShift : {type : String},
     endOfShift : {type : String},
     timeClockedOut : {type : String},
