@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,7 +15,7 @@ app = FastAPI(title="Shift-Sync ML Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[os.environ.get("ALLOWED_ORIGIN", "http://localhost:3000")],
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )

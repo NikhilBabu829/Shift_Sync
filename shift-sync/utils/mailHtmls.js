@@ -24,7 +24,7 @@ function sendingToken(token){
               </tr>
               <tr>
                 <td align="center" style="padding: 20px;">
-                  <a href=http://localhost:3000/api/create-staff-acc/${token}
+                  <a href=${process.env.BASE_URL}/api/create-staff-acc/${token}
                     style="background-color: #007BFF; color: #ffffff; padding: 12px 24px; 
                             text-decoration: none; border-radius: 5px; font-size: 16px; 
                             display: inline-block;">
@@ -91,7 +91,7 @@ function initiateSwap(data){
         </p>
 
         <div style="text-align:center; margin:24px 0 8px;">
-          <a href=http://localhost:3000/api/staffB-accepts/${data.id}
+          <a href=${process.env.BASE_URL}/api/staffB-accepts/${data.id}
             style="background:#28a745; color:#fff; text-decoration:none; padding:12px 20px; border-radius:6px; font-weight:bold; margin-right:10px;">
             ✅ Agree & Forward to Manager
           </a>
@@ -236,7 +236,7 @@ function emailReviewToManager(data){
         </p>
 
         <div style="text-align:center; margin:25px 0;">
-          <a href="http://localhost:3000/api/swap-final-approval/${data.id}"
+          <a href="${process.env.BASE_URL}/api/swap-final-approval/${data.id}"
             style="background-color:#28a745; color:white; text-decoration:none; padding:12px 24px; border-radius:6px; font-weight:bold; margin-right:10px;">
             ✅ Approve Swap
           </a>

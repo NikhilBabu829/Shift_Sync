@@ -5,10 +5,10 @@ const rateLimit = require('express-rate-limit')
 
 const chatRateLimit = rateLimit({
     windowMs : 60 * 1000,   // 1 minute window
-    max : 10,               // 10 messages per minute — well under Gemini free tier (15 req/min)
+    max : 5,               // 5 messages per minute
     standardHeaders : true,
     legacyHeaders : false,
-    message : { message : 'Too many messages. Please wait a minute before trying again.' }
+    message : { message : 'AI assistant is busy, please try again in a moment.' }
 })
 
 const STAFF = require('../models/staff')
@@ -130,7 +130,7 @@ router.post("/staff-clock-out", staffAuthenticationWithCookies, staffClockOut)
 
 router.post("/register-face", staffAuthenticationWithCookies, registerFace)
 
-router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "http://localhost:5173/staff-login"}),async (req, res, next)=>{
+router.get("/redirectURI", passport.authenticate("google", {failureRedirect : process.env.FRONTEND_URL + "/staff-login"}),async (req, res, next)=>{
     try{
         const {user} = req;
         const staffAccount = await STAFF.findOne({google_id : user.id})
@@ -141,7 +141,7 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
             const tokenInURl = new URLSearchParams({
                 token : topLevelToken
             })
-            return res.redirect(`http://localhost:5173/staff-login?${tokenInURl}`)
+            return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${tokenInURl}`)
         }else if(state != undefined){
             console.log(user)
             const managerToken = await TOKEN.findById(state)
@@ -163,12 +163,12 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
                         const tokenInURL = new URLSearchParams({
                             token : topLevelToken
                         })
-                        return res.redirect(`http://localhost:5173/staff-login?${tokenInURL}`)
+                        return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${tokenInURL}`)
                     }else{
                         const msg= new URLSearchParams({
                             error : "You are Not Permitted to do that!"
                         })
-                        return res.redirect(`http://localhost:5173/staff-login?${msg}`)
+                        return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
                     }
                 })
             })
@@ -178,13 +178,13 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "h
                 error : "Invite Required",
                 email : user.email
             }).toString()
-            return res.redirect(`http://localhost:5173/staff-login?${msg}`)
+            return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
         }
     }catch(err){
         const msg = new URLSearchParams({
             error : err
         }).toString()
-        return res.redirect(`http://localhost:5173/staff-login?${msg}`)
+        return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
     }
 })
 
