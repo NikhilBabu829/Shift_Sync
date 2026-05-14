@@ -1,6 +1,15 @@
 const express = require('express')
 const router = express.Router()
 const jwt = require('jsonwebtoken')
+const rateLimit = require('express-rate-limit')
+
+const chatRateLimit = rateLimit({
+    windowMs : 60 * 1000,   // 1 minute window
+    max : 10,               // 10 messages per minute — well under Gemini free tier (15 req/min)
+    standardHeaders : true,
+    legacyHeaders : false,
+    message : { message : 'Too many messages. Please wait a minute before trying again.' }
+})
 
 const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
@@ -8,7 +17,10 @@ const TOKEN = require("../models/tokenSign")
 const CLCOKIN = require("../models/clockIn")
 
 const { manager_sign_up, manager_invite, swapFinalApproval, download_attendance } = require('../controllers/managerController')
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut } = require('../controllers/staffController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut, registerFace } = require('../controllers/staffController')
+const { handleChat } = require('../controllers/aiController')
+const SHIFT = require('../models/shift')
+const { findCoverCandidates } = require('../services/smartMatchService')
 const passport = require('passport')
 const {testMail} = require('../controllers/sendMails')
 
@@ -116,6 +128,8 @@ router.post("/staff-clock-in", staffAuthenticationWithCookies, staffClockIn)
 
 router.post("/staff-clock-out", staffAuthenticationWithCookies, staffClockOut)
 
+router.post("/register-face", staffAuthenticationWithCookies, registerFace)
+
 router.get("/redirectURI", passport.authenticate("google", {failureRedirect : "http://localhost:5173/staff-login"}),async (req, res, next)=>{
     try{
         const {user} = req;
@@ -194,6 +208,34 @@ router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req,
         return res.status(200).json(clockInRecordsOfStaff)
     }catch(err){
         return res.status(500).json({message : "Server error"})
+    }
+})
+
+// Org config — returns HQ coordinates for geo-fence (used by ClockIn/ClockOut)
+router.get("/org-config", staffAuthenticationWithCookies, async (req, res) => {
+    try {
+        const manager = await MANAGER.findOne({ 'hq_coordinates.lat': { $ne: null } }, 'org_name hq_coordinates')
+        if (!manager) return res.status(404).json({ message: "No organisation config found. Ask your manager to set HQ coordinates." })
+        return res.status(200).json({ org_name: manager.org_name, hq_coordinates: manager.hq_coordinates })
+    } catch (err) {
+        return res.status(500).json({ message: "Server error" })
+    }
+})
+
+// AI routes
+
+// NLP Shift Manager — staff sends a natural language message
+router.post("/chat", chatRateLimit, staffAuthenticationWithCookies, handleChat)
+
+// Smart Match — manager manually triggers cover search for an open shift
+router.post("/find-cover/:shiftId", authMiddleWare, async (req, res) => {
+    try{
+        const shift = await SHIFT.findById(req.params.shiftId)
+        if(!shift) return res.status(404).json({ message : "Shift not found" })
+        const candidates = await findCoverCandidates(shift)
+        return res.status(200).json({ candidates })
+    }catch(err){
+        return res.status(500).json({ message : "Smart Match failed", error : err.message })
     }
 })
 

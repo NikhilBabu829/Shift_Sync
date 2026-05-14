@@ -391,4 +391,99 @@ function managerConfirmationMail(data){
   `
 }
 
-module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, managerConfirmationMail, staffAConfirmationMail }
+function gpsFlagAlert(data) {
+  const flags = []
+  if (data.isDriveByPunch) flags.push(`Drive-by punch detected — speed recorded: <strong>${data.velocityMph} mph</strong>`)
+  if (data.isSpoofedGPS) flags.push('Zero-variance GPS detected — coordinates are suspiciously identical across all polls')
+
+  return `
+  <!DOCTYPE html>
+  <html lang="en">
+    <body style="font-family: Arial, sans-serif; background:#f8f9fa; padding:20px; color:#333;">
+      <div style="max-width:650px; margin:auto; background:#fff; padding:24px; border-radius:10px; border-left: 5px solid #dc3545;">
+        <h2 style="color:#dc3545; margin-top:0;">GPS Clock-In Alert</h2>
+
+        <p>Hi <strong>${data.managerName}</strong>,</p>
+
+        <p>A suspicious clock-in was recorded for <strong>${data.staffName}</strong> and requires your review.</p>
+
+        <h3 style="margin:18px 0 10px;">Flags Raised</h3>
+        <ul style="margin:0 0 16px 18px; padding:0;">
+          ${flags.map(f => `<li style="margin-bottom:6px;">${f}</li>`).join('')}
+        </ul>
+
+        <h3 style="margin:18px 0 10px;">Clock-In Details</h3>
+        <table style="width:100%; border-collapse:collapse;">
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Staff Member</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.staffName}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Date</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.dateClockedIn}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Time</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.timeClockedIn}</td>
+          </tr>
+        </table>
+
+        <p style="margin-top:16px; color:#777; font-size:13px;">
+          The clock-in has been recorded normally. This alert is for your awareness only — no action has been taken automatically.
+        </p>
+
+        <p style="margin-top:20px;">Regards,<br><strong>Shift-Sync System</strong></p>
+      </div>
+    </body>
+  </html>
+  `
+}
+
+function shiftCoverNotification(data) {
+  return `
+  <!DOCTYPE html>
+  <html lang="en">
+    <body style="font-family: Arial, sans-serif; background:#f8f9fa; padding:20px; color:#333;">
+      <div style="max-width:650px; margin:auto; background:#fff; padding:24px; border-radius:10px;">
+        <h2 style="color:#2a6df4; margin-top:0;">Shift Coverage Needed</h2>
+
+        <p>Hi <strong>${data.staffName}</strong>,</p>
+
+        <p>
+          A shift needs covering and based on your schedule history, you're a great fit.
+          Would you be able to cover the following shift?
+        </p>
+
+        <h3 style="margin:18px 0 10px;">Shift Details</h3>
+        <table style="width:100%; border-collapse:collapse;">
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Date</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.shiftDate}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Start Time</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.startTime}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">End Time</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.endTime}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Match Score</td>
+            <td style="padding:8px; border:1px solid #ddd;">${Math.round(data.score * 100)}% likely fit</td>
+          </tr>
+        </table>
+
+        <p style="margin-top:16px;">Please log in to the app to accept or decline this shift.</p>
+
+        <p style="margin-top:20px;">Thanks,<br><strong>Shift-Sync Team</strong></p>
+
+        <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
+        <small style="color:#777;">This is an automated message. Please do not reply directly.</small>
+      </div>
+    </body>
+  </html>
+  `
+}
+
+module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, managerConfirmationMail, staffAConfirmationMail, gpsFlagAlert, shiftCoverNotification }

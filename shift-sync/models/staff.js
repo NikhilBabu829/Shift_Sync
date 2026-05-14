@@ -6,8 +6,10 @@ const StaffSchema = new Schema({
     email : {type : String},
     staffName : {type : String},
     profile_picture : {type : String},
+    role : {type : String, default : 'staff'},
+    faceDescriptor : {type : [Number], default : null},
     clock_In_Details : [{type : Schema.Types.ObjectId, ref : "ClockIn"}],
-    cloclk_Out_Details : [{type : Schema.Types.ObjectId, ref : "ClockOut"}]
+    clockOutDetails : [{type : Schema.Types.ObjectId, ref : "ClockOut"}]
 })
 
 module.exports = mongoose.model('Staff', StaffSchema);

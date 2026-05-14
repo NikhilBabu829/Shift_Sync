@@ -8,7 +8,10 @@ const asyncHandler = require('express-async-handler')
 const jwt = require('jsonwebtoken')
 const passport = require('passport')
 const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfirmationMail } = require('../utils/mailHtmls')
-const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail } = require('./sendMails')
+const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail, notifyManagerGpsFlag } = require('./sendMails')
+const { runVelocityChecks, detectZeroVariance } = require('../services/gpsService')
+const { verifyFace, isValidDescriptor } = require('../services/faceService')
+const mlService = require('../services/mlService')
 const clockIn = require('../models/clockIn')
 const clockOut = require('../models/clockOut')
 
@@ -124,7 +127,7 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
         const staffB = await STAFF.findById(shiftDetails.swap_belongs_to)
         const staffA = await STAFF.findById(shiftDetails.belongs_to)
         const managers = await MANAGER.find()
-        const randomManager = Math.random().toFixed(0) * (managers.length - 1)
+        const randomManager = Math.floor(Math.random() * managers.length)
         const data = {
             id : shiftDetails.id,
             date : shiftDetails.date.toDateString(),
@@ -181,55 +184,121 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
 
 exports.staffClockIn = asyncHandler(async (req, res)=>{
     try{
-        const something = req.body
+        const body = req.body
+        const gpsCoordinates = Array.isArray(body.gpsCoordinates) ? body.gpsCoordinates : []
+
+        // --- GPS velocity check (pure math, synchronous) ---
+        const { isDriveByPunch, maxVelocityMph } = runVelocityChecks(gpsCoordinates)
+        const isSpoofedGPS = detectZeroVariance(gpsCoordinates)
+
+        // --- Face verification (synchronous, purely math) ---
+        const incomingDescriptor = Array.isArray(body.faceDescriptor) ? body.faceDescriptor : null
+        const staffRecord = await STAFF.findById(req.user.id).select('faceDescriptor')
+        const hasStoredDescriptor = staffRecord?.faceDescriptor?.length === 128
+
+        let faceVerification = { registered: hasStoredDescriptor, isVerified: null, distance: null }
+        if (hasStoredDescriptor && incomingDescriptor && isValidDescriptor(incomingDescriptor)) {
+            const result = verifyFace(staffRecord.faceDescriptor, incomingDescriptor)
+            faceVerification.isVerified = result.isVerified
+            faceVerification.distance = result.distance
+        }
+
         const dataEntry = new clockIn({
             staffMember : req.user.id,
-            startOfShift : something.startOfShift,
-            endOfShift : something.endOfShift,
-            timeClockedIn : something.timeClockedIn,
-            dateClockedIn : something.dateClockedIn,
-            isLate : something.isLate
+            startOfShift : body.startOfShift,
+            endOfShift : body.endOfShift,
+            timeClockedIn : body.timeClockedIn,
+            dateClockedIn : body.dateClockedIn,
+            isLate : body.isLate,
+            gpsCoordinates : gpsCoordinates,
+            gpsFlags : {
+                isDriveByPunch : isDriveByPunch,
+                isSpoofedGPS : isSpoofedGPS,
+                velocityMph : maxVelocityMph
+            },
+            faceVerification
         })
         await dataEntry.save()
-        console.log(dataEntry)
-        if(dataEntry){
-            const newClockOut = new clockOut({
-                staffMember : req.user.id,
-                clockInRecord : dataEntry._id,
-                startOfShift : something.startOfShift,
-                endOfShift : something.endOfShift
-            })
-            await newClockOut.save()
-        }
-        if(dataEntry){
-            const currentUser = await STAFF.findByIdAndUpdate(req.user.id, {$push : {clock_In_Details : dataEntry._id}}, {new : true})
-            console.log(currentUser)
-        }
-        return res.status(200).json({
-            msg : "Your Clock-in has been accepted"
+
+        const newClockOut = new clockOut({
+            staffMember : req.user.id,
+            clockInRecord : dataEntry._id,
+            startOfShift : body.startOfShift,
+            endOfShift : body.endOfShift
         })
+        await newClockOut.save()
+
+        await STAFF.findByIdAndUpdate(req.user.id, {$push : {clock_In_Details : dataEntry._id}}, {new : true})
+
+        // --- Respond immediately — GPS flag and ML check run in background ---
+        const response = { msg : "Your Clock-in has been accepted" }
+        if(isDriveByPunch || isSpoofedGPS) response.gpsWarning = true
+        res.status(200).json(response)
+
+        // --- Notify managers if flagged (non-blocking) ---
+        if(isDriveByPunch || isSpoofedGPS){
+            const staffMember = await STAFF.findById(req.user.id).select('staffName')
+            const managers = await MANAGER.find().select('email first_name')
+            const alertData = {
+                staffName : staffMember.staffName,
+                managerName : managers[0]?.first_name || 'Manager',
+                dateClockedIn : body.dateClockedIn,
+                timeClockedIn : body.timeClockedIn,
+                isDriveByPunch,
+                isSpoofedGPS,
+                velocityMph : maxVelocityMph
+            }
+            for(const mgr of managers){
+                notifyManagerGpsFlag(mgr.email, { ...alertData, managerName : mgr.first_name })
+            }
+        }
+
+        // --- ML anomaly check (async, updates record after the fact) ---
+        if(gpsCoordinates.length >= 2){
+            mlService.checkGPSAnomaly({
+                staffId : req.user.id,
+                gpsCoordinates,
+                clockInId : dataEntry._id.toString()
+            }).then(async (result) => {
+                if(result && result.isolationScore != null){
+                    await clockIn.findByIdAndUpdate(dataEntry._id, {
+                        'gpsFlags.isolationScore' : result.isolationScore
+                    })
+                }
+            }).catch(() => { /* ML service unavailable — fail open */ })
+        }
+
     }catch(err){
         console.log(err)
         return res.status(400).json(err)
     }
 })
 
+exports.registerFace = asyncHandler(async (req, res)=>{
+    const { faceDescriptor } = req.body
+    if (!isValidDescriptor(faceDescriptor)) {
+        return res.status(400).json({ message : 'faceDescriptor must be an array of exactly 128 finite numbers.' })
+    }
+    await STAFF.findByIdAndUpdate(req.user.id, { faceDescriptor })
+    return res.status(200).json({ message : 'Face registered successfully.' })
+})
+
 exports.staffClockOut = asyncHandler(async (req, res)=>{
     try{
         const someData = req.body
-        const dataEntry = new clockOut({
-            staffMember : req.user.id,
-            startOfShift : someData.startOfShift,
-            endOfShift : someData.endOfShift,
-            timeClockedOut : someData.timeClockedOut,
-            dateClockedOut : someData.dateClockedOut,
-            isLate : someData.isLate
-        })
-        await dataEntry.save()
-        if(dataEntry){
-            const currentUser = await STAFF.findByIdAndUpdate(req.user.id, {$push : {cloclk_Out_Details : dataEntry._id}}, {new : true})
-            console.log(currentUser)
+        const updated = await clockOut.findOneAndUpdate(
+            { staffMember : req.user.id, timeClockedOut : { $exists : false } },
+            {
+                timeClockedOut : someData.timeClockedOut,
+                dateClockedOut : someData.dateClockedOut,
+                isLate : someData.isLate
+            },
+            { new : true }
+        )
+        if(!updated){
+            return res.status(404).json({ msg : "No open clock-in found to clock out from" })
         }
+        await STAFF.findByIdAndUpdate(req.user.id, {$push : {clockOutDetails : updated._id}}, {new : true})
         return res.status(200).json({
             msg : "Your Clock-out has been accepted"
         })

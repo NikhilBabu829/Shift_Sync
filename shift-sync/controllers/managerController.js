@@ -19,11 +19,10 @@ const {inviteMember, managerConfirmationEmail} = require('./sendMails')
 const { sendingToken, managerConfirmationMail } = require('../utils/mailHtmls') 
 
 exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
-    const { first_name, last_name, email, password } = req.body
+    const { first_name, last_name, email, password, org_name, hq_lat, hq_lng } = req.body
     const check = await MANAGER.findOne({email : email})
     if(check){
-        res.status(400)
-        throw new Error("email already exists")
+        return res.status(400).json({ message: "An account with this email already exists." })
     }
     else{
         bcrypt.hash(password, 15, async(err, hashedPassword)=>{
@@ -31,9 +30,20 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
                 res.json(err)
             }
             else{
-                const manager = new MANAGER({first_name:first_name, last_name : last_name ,email : email, password : hashedPassword, manager : true})
+                const manager = new MANAGER({
+                    first_name,
+                    last_name,
+                    email,
+                    password : hashedPassword,
+                    manager : true,
+                    org_name : org_name || '',
+                    hq_coordinates : {
+                        lat : hq_lat ? parseFloat(hq_lat) : null,
+                        lng : hq_lng ? parseFloat(hq_lng) : null
+                    }
+                })
                 await manager.save()
-                res.status(200).json({"message" : "Manager Profile created successfully", manager})
+                res.status(200).json({"message" : "Organisation registered successfully", manager})
             }
         })
     }
@@ -132,21 +142,47 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         const workBook = new ExcelJS.Workbook()
         workBook.creator = 'Shift Sync Server'
         workBook.created = new Date()
-    
-        const staffSheet = workBook.addWorksheet('Staff Members')
-    
-        let clockInData = {}
 
-        // ...allClockInDetails.map((clockIn, index)=>(
-        //     {header : `${clockIn.dateClockedIn}`, key : `in_${index}`, width : 20}
-        // ))
-    
+        const staffSheet = workBook.addWorksheet('Staff Members')
+
+        // Sort dates chronologically so columns read left-to-right in time order
+        gettingOnlyClockInDates.sort()
+
         staffSheet.columns = [
             {header : "Staff Name", key : "staffName", width : 30},
-            ...gettingOnlyClockInDates.map((clockIn, index)=>(
-                {header : `${clockIn}`, key : `in_${index}`, width : 20}))
+            ...gettingOnlyClockInDates.map((date, index)=>(
+                {header : date, key : `in_${index}`, width : 20}))
         ]
-    
+
+        // Build lookup: staffId → { date → "clockIn – clockOut" }
+        const clockOutMap = {}
+        for(const record of allClockOutDetails){
+            const staffId = String(record.staffMember._id)
+            if(!clockOutMap[staffId]) clockOutMap[staffId] = {}
+            // key by the clockIn record's linked date via clockInRecord — use dateClockedOut as fallback
+            clockOutMap[staffId][String(record.clockInRecord)] = record.timeClockedOut
+        }
+
+        const attendanceMap = {}
+        for(const record of allClockInDetails){
+            const staffId = String(record.staffMember._id)
+            if(!attendanceMap[staffId]) attendanceMap[staffId] = {}
+            const clockOut = clockOutMap[staffId]?.[String(record._id)]
+            attendanceMap[staffId][record.dateClockedIn] = clockOut
+                ? `${record.timeClockedIn} – ${clockOut}`
+                : record.timeClockedIn
+        }
+
+        // One row per staff member
+        for(const staff of allStaffMembers){
+            const staffId = String(staff._id)
+            const row = { staffName : staff.staffName }
+            gettingOnlyClockInDates.forEach((date, index) => {
+                row[`in_${index}`] = attendanceMap[staffId]?.[date] || ''
+            })
+            staffSheet.addRow(row)
+        }
+
         res.setHeader(
           'Content-Type',
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'

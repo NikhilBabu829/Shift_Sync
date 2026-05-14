@@ -9,4 +9,4 @@ const ShiftSchema = new Schema({
     swap_shift_length : {type : Number},
 })
 
-module.exports = mongoose.model('Shift', ShiftSchema)
+module.exports = mongoose.model('SwapShift', ShiftSchema)

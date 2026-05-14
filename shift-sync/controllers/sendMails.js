@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer')
 const asyncHandler = require('express-async-handler')
+const { gpsFlagAlert, shiftCoverNotification } = require('../utils/mailHtmls')
 
 const {
     GMAIL,
@@ -95,14 +96,50 @@ exports.swapForwardToManagerEmail = asyncHandler(async (data)=>{
     }
 })
 
-exports.managerConfirmationEmail = asyncHandler(async (data)=>{
-    console.log(data)
+exports.notifyManagerGpsFlag = async (managerEmail, alertData) => {
     try{
+        const bodyHTML = gpsFlagAlert(alertData)
+        await transporter.sendMail({
+            from : GMAIL,
+            to : managerEmail,
+            subject : `GPS Alert: Suspicious Clock-In by ${alertData.staffName}`,
+            html : bodyHTML
+        })
+    }catch(err){
+        console.error('GPS flag email failed:', err.message)
+    }
+}
+
+exports.notifyCoverCandidates = async (candidates) => {
+    for(const candidate of candidates){
+        try{
+            const bodyHTML = shiftCoverNotification({
+                staffName : candidate.staffName,
+                shiftDate : candidate.shiftDate,
+                startTime : candidate.startTime,
+                endTime : candidate.endTime,
+                score : candidate.score
+            })
+            await transporter.sendMail({
+                from : GMAIL,
+                to : candidate.email,
+                subject : `Shift Coverage Opportunity — ${candidate.shiftDate}`,
+                html : bodyHTML
+            })
+        }catch(err){
+            console.error(`Cover notify failed for ${candidate.email}:`, err.message)
+        }
+    }
+}
+
+exports.managerConfirmationEmail = asyncHandler(async (data)=>{
+    try{
+        const { to, bodyHTML } = data.data
         const mailService = await transporter.sendMail({
             from : GMAIL,
-            to : data.to,
-            subject : `Shift Swap Request Has Been Approved — ${data.to.staffName} ⇄ ${data.staffB.staffName}`,
-            html : data.bodyHTML
+            to : to.email,
+            subject : `Your Shift Swap Has Been Approved — Shift-Sync`,
+            html : bodyHTML
         })
         return mailService
     }catch(err){
