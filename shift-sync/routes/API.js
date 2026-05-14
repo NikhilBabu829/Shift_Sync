@@ -86,6 +86,11 @@ router.post('/send-mail',authMiddleWare, testMail)
 
 router.post("/swap-final-approval/:id", authMiddleWare, swapFinalApproval)
 
+router.get("/pending-swaps", authMiddleWare, async (req, res)=>{
+    const { getPendingSwaps } = require('../controllers/managerController');
+    return getPendingSwaps(req, res);
+})
+
 router.get("/manager-auth", authMiddleWare, async (req, res)=>{
     const manager = await MANAGER.findById(req.user.id)
     return res.status(200).json({user : manager})

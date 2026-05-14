@@ -8,7 +8,7 @@ const asyncHandler = require('express-async-handler')
 const jwt = require('jsonwebtoken')
 const passport = require('passport')
 const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfirmationMail } = require('../utils/mailHtmls')
-const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail, notifyManagerGpsFlag } = require('./sendMails')
+const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail } = require('./sendMails')
 const { runVelocityChecks, detectZeroVariance } = require('../services/gpsService')
 const { verifyFace, isValidDescriptor } = require('../services/faceService')
 const mlService = require('../services/mlService')
@@ -248,8 +248,12 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
                 isSpoofedGPS,
                 velocityMph : maxVelocityMph
             }
-            for(const mgr of managers){
-                notifyManagerGpsFlag(mgr.email, { ...alertData, managerName : mgr.first_name })
+
+            try {
+                const io = require('../utils/socket').getIO();
+                io.emit('gps_warning', alertData);
+            } catch (socketErr) {
+                console.error("Socket error on gps_warning emit:", socketErr);
             }
         }
 
