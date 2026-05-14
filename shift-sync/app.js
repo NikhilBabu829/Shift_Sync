@@ -28,7 +28,7 @@ const MANAGER = require('./models/manager')
 const STAFF = require('./models/staff')
 
 app.use(cors({
-  origin : process.env.CORS_ORIGIN || "http://localhost:5173",
+  origin : process.env.FRONTEND_URL || "http://localhost:5173",
   methods : ["GET", "POST"],
   credentials : true
 }))
