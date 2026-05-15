@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ./shift-sync
+    ports:
+      - "3000:3000"
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/shift-sync
+      - JWT_SECRET=change_me
+      - JWT_INVITE_SECRET=change_me
+      - ROOT_SECRET_PASS=change_me
+      - PASSPORT_SECRET=change_me
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=gemma3
+      - ML_SERVICE_URL=http://ml-service:8000
+      - BASE_URL=http://localhost:3000
+      - FRONTEND_URL=http://localhost:5173
+      - CORS_ORIGIN=http://localhost:5173
+    depends_on:
+      - mongo
+      - ml-service
+      - ollama
+
+  ml-service:
+    build:
+      context: ./ml-service
+    ports:
+      - "8000:8000"
+    environment:
+      - ALLOWED_ORIGIN=http://localhost:3000
+
+  mongo:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    # Note: Requires pulling the model manually after startup: docker exec -it shift-sync-ollama-1 ollama pull gemma3
+
+volumes:
+  mongo-data:
+  ollama-data:

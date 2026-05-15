@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node ./bin/www",
-    "watch": "nodemon --watch"
+    "watch": "nodemon --watch",
+    "test": "jest"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -32,5 +33,8 @@
     "passport-google-oauth20": "^2.0.0",
     "passport-local": "^1.0.0",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
   }
 }
