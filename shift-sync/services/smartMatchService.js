@@ -10,7 +10,6 @@
 const STAFF = require('../models/staff')
 const CLOCKIN = require('../models/clockIn')
 const { rankStaffForCoverage } = require('./mlService')
-const { notifyCoverCandidates } = require('../controllers/sendMails')
 
 const MAX_WEEKLY_HOURS = 40
 const TOP_N = 3
@@ -159,9 +158,12 @@ async function findCoverCandidates(openShift) {
         score : c.score
     }))
 
-    notifyCoverCandidates(notifyPayload).catch((err) =>
-        console.error('Cover notification failed:', err?.message)
-    )
+    try {
+        const io = require('../utils/socket').getIO();
+        io.emit('shift_open', { shift: openShift, candidates: top });
+    } catch (socketErr) {
+        console.error('Socket error on shift_open emit:', socketErr);
+    }
 
     return top.map((c) => ({
         staffId : c.staffId,

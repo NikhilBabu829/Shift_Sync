@@ -85,6 +85,19 @@ exports.manager_invite = asyncHandler(async (req, res)=>{
     }
 })
 
+exports.getPendingSwaps = asyncHandler(async (req, res)=>{
+    try{
+        const pendingSwaps = await SHIFT.find({status: 'pending_swap', swap_belongs_to: { $exists: true, $ne: null }})
+            .populate('belongs_to', 'staffName email')
+            .populate('swap_belongs_to', 'staffName email')
+            .lean()
+        res.status(200).json({ pendingSwaps })
+    } catch(err) {
+        console.log(err)
+        res.status(500).json({ message: "Server error retrieving pending swaps", err })
+    }
+})
+
 exports.swapFinalApproval = asyncHandler(async (req, res)=>{
     const {id} = req.params
     try{
@@ -129,13 +142,39 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
 exports.download_attendance = asyncHandler(async (req, res)=>{
 
     try{
-        const allStaffMembers = await STAFF.find()
-    
-        const allClockInDetails = await CLOCKIN.find().populate('staffMember', 'staffName email').lean()
+        const { startDate, endDate, role } = req.query;
 
-        const gettingOnlyClockInDates = await CLOCKIN.distinct('dateClockedIn')
+        let staffFilter = {};
+        if (role) {
+            staffFilter.role = role;
+        }
+
+        const allStaffMembers = await STAFF.find(staffFilter).lean()
+        const staffIds = allStaffMembers.map(s => s._id);
+
+        let dateFilter = {};
+        if (startDate && endDate) {
+            dateFilter = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            dateFilter = { $gte: startDate };
+        } else if (endDate) {
+            dateFilter = { $lte: endDate };
+        }
+
+        let clockInFilter = { staffMember: { $in: staffIds } };
+        if (Object.keys(dateFilter).length > 0) {
+            clockInFilter.dateClockedIn = dateFilter;
+        }
+
+        const allClockInDetails = await CLOCKIN.find(clockInFilter).populate('staffMember', 'staffName email').lean()
+
+        const gettingOnlyClockInDates = await CLOCKIN.distinct('dateClockedIn', clockInFilter)
     
-        const allClockOutDetails = await CLOCKOUT.find().populate('staffMember', 'staffName email').lean()
+        let clockOutFilter = { staffMember: { $in: staffIds } };
+        if (Object.keys(dateFilter).length > 0) {
+            clockOutFilter.dateClockedOut = dateFilter;
+        }
+        const allClockOutDetails = await CLOCKOUT.find(clockOutFilter).populate('staffMember', 'staffName email').lean()
 
         console.log(gettingOnlyClockInDates)
     
