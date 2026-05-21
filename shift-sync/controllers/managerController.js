@@ -1,25 +1,37 @@
 
+// Mongoose models used across manager operations
 const MANAGER = require('../models/manager')
 const SHIFT = require('../models/shift')
 const STAFF = require("../models/staff")
 const CLOCKOUT = require("../models/clockOut")
 const CLOCKIN = require("../models/clockIn")
 const TOKEN = require('../models/tokenSign')
+const SHIFT_REQUEST = require('../models/shiftRequest')
 const bcrypt = require('bcryptjs')
 const passport = require('passport')
+// Wraps async route handlers and forwards thrown errors to Express error handler
 const asyncHandler = require('express-async-handler')
 const jwt = require('jsonwebtoken')
 
+// Excel workbook builder for the attendance export
 const ExcelJS = require('exceljs')
 
+// Validates email address format before sending invites
 const emailValidator = require('email-validator')
 
+// Mail-sending helpers for invite and swap-approval emails
 const {inviteMember, managerConfirmationEmail} = require('./sendMails')
 
-const { sendingToken, managerConfirmationMail } = require('../utils/mailHtmls') 
+// Google Calendar integration — creates/deletes events on staff members' calendars
+const { createShiftEvent, deleteShiftEvent } = require('../services/googleCalendarService')
 
+// HTML template builders for outgoing emails
+const { sendingToken, managerConfirmationMail } = require('../utils/mailHtmls')
+
+// Creates a new manager account and organisation; hashes the password before storing
 exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
-    const { first_name, last_name, email, password, org_name, hq_lat, hq_lng } = req.body
+    const { first_name, last_name, email, password, org_name, hq_lat, hq_lng, rosterType, roles } = req.body
+    // Prevent duplicate accounts for the same email
     const check = await MANAGER.findOne({email : email})
     if(check){
         return res.status(400).json({ message: "An account with this email already exists." })
@@ -40,7 +52,10 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
                     hq_coordinates : {
                         lat : hq_lat ? parseFloat(hq_lat) : null,
                         lng : hq_lng ? parseFloat(hq_lng) : null
-                    }
+                    },
+                    // Default to weekly roster if an unrecognised type is submitted
+                    rosterType : ['weekly', 'monthly'].includes(rosterType) ? rosterType : 'weekly',
+                    roles : Array.isArray(roles) ? roles.map(r => String(r).trim()).filter(Boolean) : []
                 })
                 await manager.save()
                 res.status(200).json({"message" : "Organisation registered successfully", manager})
@@ -49,42 +64,128 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
     }
 })
 
+// Sends invite email(s) to one or more email addresses; creates a signed invite token per address
 exports.manager_invite = asyncHandler(async (req, res)=>{
     console.log("Manager Invite has begun")
-    const{ to, subject, text } = req.body
+    const{ to, role, department, message } = req.body
+
+    // Support both single string and array of emails
+    const emails = Array.isArray(to) ? to : [to]
+    const results = []
+
     try{
         const authHeader = req.headers['authorization']
-        const token = authHeader && authHeader.split(" ")[1]
-        
-        const tokenSign = jwt.sign({signed : token}, process.env.JWT_INVITE_SECRET ,{expiresIn : '6h'})
-        
-        const tokenEntry = new TOKEN({token : tokenSign})
-        await tokenEntry.save()
-        console.log(tokenEntry)
-    
-        const mailHTML = sendingToken(tokenEntry._id)
+        // Extract the raw manager JWT to embed inside the invite token
+        const managerToken = authHeader && authHeader.split(" ")[1]
 
-            const inviteResponse = await inviteMember({ to : to, subject : "you've been invited to ...", text : "", html : mailHTML })
-            console.log(inviteResponse)
-            if(inviteResponse.accepted && inviteResponse.accepted.length > 0){
-                return res.status(200).json({
-                    message : "Mail sent successfully",
-                    messageId : inviteResponse.messageId
-                })
-            }else{
-                return res.status(400).json({
-                    message : "Mail was not accepted by the server please try again later",
-                    messageId : inviteResponse.messageId
-                })
+        for (const email of emails) {
+            // Skip and record failure for any malformed email addresses
+            if (!emailValidator.validate(email)) {
+                results.push({ email, status: 'error', message: 'Invalid email format' })
+                continue
             }
+
+            // Sign the manager token inside an invite-specific JWT so it can be verified on acceptance
+            const tokenSign = jwt.sign({signed : managerToken}, process.env.JWT_INVITE_SECRET ,{expiresIn : '24h'})
+
+            // Persist the invite token so the acceptance route can retrieve and validate it
+            const tokenEntry = new TOKEN({
+                token : tokenSign,
+                email : email,
+                role : role || 'Staff Member',
+                department : department || 'General',
+                message : message || ''
+            })
+            await tokenEntry.save()
+            console.log(tokenEntry)
+
+            // Build the invite HTML email using the token's DB id as the unique link
+            const mailHTML = sendingToken(tokenEntry._id)
+
+            const inviteResponse = await inviteMember({
+                to : email,
+                subject : "You've been invited to Shift Sync",
+                text : message || "",
+                html : mailHTML
+            })
+
+            if(inviteResponse.accepted && inviteResponse.accepted.length > 0){
+                results.push({ email, status: 'success', messageId: inviteResponse.messageId })
+            } else {
+                results.push({ email, status: 'error', message: 'Mail was not accepted by the server' })
+            }
+        }
+
+        // Return 200 if at least one invite was accepted by the SMTP server
+        const anySuccess = results.some(r => r.status === 'success')
+        if (anySuccess) {
+            return res.status(200).json({
+                message : "Invitations processed",
+                results
+            })
+        } else {
+            return res.status(400).json({
+                message : "Failed to send any invitations",
+                results
+            })
+        }
     }catch(err){
         res.status(400).json({
-            message : "Failed to send the mail, plase try agian later",
-            err : err
+            message : "Failed to process invitations, please try again later",
+            err : err.message
         })
     }
 })
 
+// Returns all pending invite tokens sorted newest-first
+exports.get_pending_invitations = asyncHandler(async (req, res) => {
+    try {
+        const pending = await TOKEN.find().sort({ createdAt: -1 })
+        res.status(200).json({ pending })
+    } catch (err) {
+        res.status(500).json({ message: "Server error retrieving pending invitations", err: err.message })
+    }
+})
+
+// Permanently deletes an invite token so the link can no longer be used
+exports.revoke_invitation = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    try {
+        const deleted = await TOKEN.findByIdAndDelete(id)
+        if (!deleted) return res.status(404).json({ message: "Invitation not found" })
+        res.status(200).json({ message: "Invitation revoked successfully" })
+    } catch (err) {
+        res.status(500).json({ message: "Server error revoking invitation", err: err.message })
+    }
+})
+
+// Re-sends the invite email for an existing (un-expired) token
+exports.resend_invitation = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    try {
+        const invite = await TOKEN.findById(id)
+        if (!invite) return res.status(404).json({ message: "Invitation not found" })
+
+        // Rebuild the email HTML with the same token id so the link still works
+        const mailHTML = sendingToken(invite._id)
+        const inviteResponse = await inviteMember({
+            to : invite.email,
+            subject : "Reminder: You've been invited to Shift Sync",
+            text : invite.message || "",
+            html : mailHTML
+        })
+
+        if(inviteResponse.accepted && inviteResponse.accepted.length > 0){
+            res.status(200).json({ message: "Invitation resent successfully" })
+        } else {
+            res.status(400).json({ message: "Failed to resend invitation" })
+        }
+    } catch (err) {
+        res.status(500).json({ message: "Server error resending invitation", err: err.message })
+    }
+})
+
+// Returns all shifts in pending_swap status that have a swap partner, for manager review
 exports.getPendingSwaps = asyncHandler(async (req, res)=>{
     try{
         const pendingSwaps = await SHIFT.find({status: 'pending_swap', swap_belongs_to: { $exists: true, $ne: null }})
@@ -98,6 +199,7 @@ exports.getPendingSwaps = asyncHandler(async (req, res)=>{
     }
 })
 
+// Manager approves a swap — sends confirmation emails to both parties and marks the shift as approved
 exports.swapFinalApproval = asyncHandler(async (req, res)=>{
     const {id} = req.params
     try{
@@ -106,20 +208,25 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
             const staffA = await STAFF.findById(shiftDetails.belongs_to)
             const staffB = await STAFF.findById(shiftDetails.swap_belongs_to)
             const Manager = await MANAGER.findById(req.user.id)
+            // Normalise date values to readable strings regardless of storage type
+            const toDateStr = (v) => v ? (v instanceof Date ? v.toDateString() : String(v)) : ''
             const shift = {
-                date : shiftDetails.date.toDateString(),
+                date : toDateStr(shiftDetails.date),
                 shift_start_time : shiftDetails.shift_start_time,
                 shift_end_time : shiftDetails.shift_end_time,
-                swapDate : shiftDetails.swapDate.toDateString(),
+                swapDate : toDateStr(shiftDetails.swapDate),
                 swap_shift_start_time : shiftDetails.swap_shift_start_time,
                 swap_shift_end_time : shiftDetails.swap_shift_end_time
             }
             if(staffA && staffB){
+                // Build personalised HTML email bodies for each staff member
                 const staffABodyHTML = managerConfirmationMail({to : staffA, staffB : staffB, manager_name : Manager.first_name, shiftDetails : shift})
                 const staffBBodyHTML = managerConfirmationMail({to : staffB, staffB : staffA, manager_name : Manager.first_name, shiftDetails : shift})
                 const mailToStaffA = await managerConfirmationEmail({data : {to : staffA, bodyHTML : staffABodyHTML}})
                 const mailToStaffB = await managerConfirmationEmail({data : {to : staffB, bodyHTML : staffBBodyHTML}})
                 if((mailToStaffA.accepted && mailToStaffA.accepted.length > 0) && (mailToStaffB.accepted && mailToStaffB.accepted.length > 0)){
+                    // Only update the DB status after both emails are confirmed delivered
+                    await SHIFT.findByIdAndUpdate(id, { status: 'approved' })
                     return res.status(200).json({
                         message : "Mail has been sent successfully"
                     })
@@ -139,11 +246,194 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
     }
 })
 
+// Deletes the pending swap shift record, effectively denying the swap
+exports.denySwap = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    await SHIFT.findByIdAndDelete(id)
+    return res.status(200).json({ message: 'Swap request denied' })
+})
+
+// Returns all staff with basic profile fields for the manager's staff directory
+exports.getManagerStaff = asyncHandler(async (req, res) => {
+    const staff = await STAFF.find({}, 'staffName email department role').lean()
+    return res.status(200).json({ staff })
+})
+
+// Returns filled roster shifts optionally filtered by date range
+exports.getRoster = asyncHandler(async (req, res) => {
+    const { from, to } = req.query
+    // Exclude swap-side shifts so only the primary assigned shifts are shown
+    const filter = { status: 'filled', swap_belongs_to: { $exists: false } }
+    if (from || to) {
+        filter.date = {}
+        if (from) filter.date.$gte = from
+        if (to) filter.date.$lte = to
+    }
+    const roster = await SHIFT.find(filter)
+        .populate('belongs_to', 'staffName')
+        .lean()
+    return res.status(200).json({ roster })
+})
+
+// Creates a single filled roster shift for a staff member
+exports.addRosterShift = asyncHandler(async (req, res) => {
+    const { staffId, date, startTime, endTime } = req.body
+    if (!staffId || !date || !startTime || !endTime) {
+        return res.status(400).json({ message: 'staffId, date, startTime, and endTime are required' })
+    }
+    // Enforce ISO date format to keep queries consistent
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ message: 'date must be in YYYY-MM-DD format' })
+    }
+    const newShift = new SHIFT({
+        belongs_to: staffId,
+        date,
+        shift_start_time: startTime.trim(),
+        shift_end_time: endTime.trim(),
+        status: 'filled'
+    })
+    await newShift.save()
+
+    // Mirror the shift in the staff member's Google Calendar if they have connected tokens
+    const staffMember = await STAFF.findById(staffId)
+    if (staffMember) {
+        const calEventId = await createShiftEvent(staffMember, newShift)
+        if (calEventId) {
+            newShift.googleCalendarEventId = calEventId
+            await newShift.save()
+        }
+    }
+
+    // Populate staff name so the response mirrors what the roster GET returns
+    await newShift.populate('belongs_to', 'staffName')
+    return res.status(200).json({ shift: newShift, message: 'Shift added to roster' })
+})
+
+// Deletes a roster shift by id and removes the matching Google Calendar event
+exports.removeRosterShift = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const shift = await SHIFT.findById(id)
+    if (shift) {
+        if (shift.googleCalendarEventId) {
+            const staffMember = await STAFF.findById(shift.belongs_to)
+            if (staffMember) await deleteShiftEvent(staffMember, shift.googleCalendarEventId)
+        }
+        await shift.deleteOne()
+    }
+    return res.status(200).json({ message: 'Shift removed from roster' })
+})
+
+// Builds the live attendance ledger for today — each row includes status (ON TIME/LATE/OVERTIME)
+exports.getTodayLedger = asyncHandler(async (req, res) => {
+    const today = new Date().toDateString()
+    const records = await CLOCKIN.find({ dateClockedIn: today })
+        .populate('staffMember', 'staffName role department')
+        .lean()
+    const clockInIds = records.map(r => r._id)
+    const clockOuts = await CLOCKOUT.find({ clockInRecord: { $in: clockInIds } }).lean()
+    // Index clock-outs by their matching clock-in id for O(1) lookup
+    const clockOutMap = {}
+    for (const co of clockOuts) {
+        clockOutMap[String(co.clockInRecord)] = co.timeClockedOut
+    }
+    const now = new Date()
+    const ledger = records.map(r => {
+        const timeClockedOut = clockOutMap[String(r._id)]
+        let status = r.isLate ? 'LATE IN' : 'ON TIME'
+        // Detect overtime: shift end has passed but the staff member hasn't clocked out
+        if (r.endOfShift && !timeClockedOut) {
+            const [endH, endM] = r.endOfShift.split(':').map(Number)
+            const shiftEnd = new Date()
+            shiftEnd.setHours(endH, endM, 0, 0)
+            if (now > shiftEnd) status = 'OVERTIME'
+        }
+        return {
+            _id: r._id,
+            name: r.staffMember?.staffName || 'Unknown',
+            role: r.staffMember?.role || '',
+            dept: r.staffMember?.department || '',
+            shift: `${r.startOfShift || ''} – ${r.endOfShift || ''}`,
+            status,
+            timeClockedIn: r.timeClockedIn,
+            timeClockedOut: timeClockedOut || null,
+        }
+    })
+    return res.status(200).json({ ledger, date: today })
+})
+
+// Returns the last 7 days of attendance counts alongside the target headcount
+exports.getWeeklyAttendance = asyncHandler(async (req, res) => {
+    // Build an array of the past 7 days (oldest first) for the chart x-axis
+    const days = []
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date()
+        d.setDate(d.getDate() - i)
+        days.push({
+            label: d.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase().slice(0, 3),
+            dateStr: d.toDateString()
+        })
+    }
+    const records = await CLOCKIN.find({ dateClockedIn: { $in: days.map(d => d.dateStr) } }).lean()
+    // Count clock-ins per date string
+    const countMap = {}
+    for (const r of records) {
+        countMap[r.dateClockedIn] = (countMap[r.dateClockedIn] || 0) + 1
+    }
+    const staffCount = await STAFF.countDocuments()
+    const result = days.map(d => ({ day: d.label, actual: countMap[d.dateStr] || 0, target: staffCount }))
+    return res.status(200).json({ weeklyAttendance: result })
+})
+
+// Returns how many staff are currently clocked in (on-shift) vs total staff count
+exports.getShiftStats = asyncHandler(async (req, res) => {
+    const today = new Date().toDateString()
+    const clockInsToday = await CLOCKIN.find({ dateClockedIn: today }, '_id').lean()
+    const clockInIds = clockInsToday.map(c => c._id)
+    // Staff who have both clocked in and clocked out are no longer on-shift
+    const clockedOutCount = await CLOCKOUT.countDocuments({
+        clockInRecord: { $in: clockInIds },
+        timeClockedOut: { $exists: true, $ne: null }
+    })
+    const total = await STAFF.countDocuments()
+    return res.status(200).json({ onShift: Math.max(0, clockInsToday.length - clockedOutCount), total })
+})
+
+// Returns the organisation's custom role list stored on the manager's document
+exports.getOrgRoles = asyncHandler(async (req, res) => {
+    const manager = await MANAGER.findById(req.user.id).select('roles')
+    return res.status(200).json({ roles: manager?.roles || [] })
+})
+
+// Appends a new role to the manager's roles array, rejecting duplicates
+exports.addOrgRole = asyncHandler(async (req, res) => {
+    const role = String(req.body.role || '').trim()
+    if (!role) return res.status(400).json({ message: 'Role name is required.' })
+    const manager = await MANAGER.findById(req.user.id).select('roles')
+    if (manager.roles.includes(role)) return res.status(409).json({ message: 'Role already exists.' })
+    manager.roles.push(role)
+    await manager.save()
+    return res.status(200).json({ roles: manager.roles, message: 'Role added.' })
+})
+
+// Removes a single role from the manager's roles array using $pull
+exports.removeOrgRole = asyncHandler(async (req, res) => {
+    const role = String(req.body.role || '').trim()
+    if (!role) return res.status(400).json({ message: 'Role name is required.' })
+    const manager = await MANAGER.findByIdAndUpdate(
+        req.user.id,
+        { $pull: { roles: role } },
+        { new: true }
+    ).select('roles')
+    return res.status(200).json({ roles: manager?.roles || [], message: 'Role removed.' })
+})
+
+// Generates and streams an Excel attendance export filtered by date range and/or role
 exports.download_attendance = asyncHandler(async (req, res)=>{
 
     try{
         const { startDate, endDate, role } = req.query;
 
+        // Optionally filter staff by role before fetching their clock-in records
         let staffFilter = {};
         if (role) {
             staffFilter.role = role;
@@ -152,6 +442,7 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         const allStaffMembers = await STAFF.find(staffFilter).lean()
         const staffIds = allStaffMembers.map(s => s._id);
 
+        // Build a date-range filter for both clock-in and clock-out queries
         let dateFilter = {};
         if (startDate && endDate) {
             dateFilter = { $gte: startDate, $lte: endDate };
@@ -168,8 +459,9 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
 
         const allClockInDetails = await CLOCKIN.find(clockInFilter).populate('staffMember', 'staffName email').lean()
 
+        // Get the distinct dates present so we can create one column per date
         const gettingOnlyClockInDates = await CLOCKIN.distinct('dateClockedIn', clockInFilter)
-    
+
         let clockOutFilter = { staffMember: { $in: staffIds } };
         if (Object.keys(dateFilter).length > 0) {
             clockOutFilter.dateClockedOut = dateFilter;
@@ -177,7 +469,8 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         const allClockOutDetails = await CLOCKOUT.find(clockOutFilter).populate('staffMember', 'staffName email').lean()
 
         console.log(gettingOnlyClockInDates)
-    
+
+        // Create a new Excel workbook for the export
         const workBook = new ExcelJS.Workbook()
         workBook.creator = 'Shift Sync Server'
         workBook.created = new Date()
@@ -187,13 +480,14 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         // Sort dates chronologically so columns read left-to-right in time order
         gettingOnlyClockInDates.sort()
 
+        // First column is staff name; subsequent columns are date-specific clock-in/out values
         staffSheet.columns = [
             {header : "Staff Name", key : "staffName", width : 30},
             ...gettingOnlyClockInDates.map((date, index)=>(
                 {header : date, key : `in_${index}`, width : 20}))
         ]
 
-        // Build lookup: staffId → { date → "clockIn – clockOut" }
+        // Build lookup: staffId → { clockInRecordId → timeClockedOut }
         const clockOutMap = {}
         for(const record of allClockOutDetails){
             const staffId = String(record.staffMember._id)
@@ -202,6 +496,7 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
             clockOutMap[staffId][String(record.clockInRecord)] = record.timeClockedOut
         }
 
+        // Build lookup: staffId → { date → "clockIn – clockOut" formatted string }
         const attendanceMap = {}
         for(const record of allClockInDetails){
             const staffId = String(record.staffMember._id)
@@ -216,12 +511,14 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
         for(const staff of allStaffMembers){
             const staffId = String(staff._id)
             const row = { staffName : staff.staffName }
+            // Fill each date column with the formatted attendance string or empty string
             gettingOnlyClockInDates.forEach((date, index) => {
                 row[`in_${index}`] = attendanceMap[staffId]?.[date] || ''
             })
             staffSheet.addRow(row)
         }
 
+        // Set response headers so the browser treats the response as a file download
         res.setHeader(
           'Content-Type',
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -230,9 +527,73 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
           'Content-Disposition',
           'attachment; filename="attendance_export.xlsx"'
         )
+        // Stream the workbook directly into the HTTP response
         await workBook.xlsx.write(res)
         res.end()
     }catch(err){
         console.log(err)
     }
+})
+
+// Returns all pending shift requests sorted by submission time for manager review
+exports.getPendingShiftRequests = asyncHandler(async (req, res) => {
+    const requests = await SHIFT_REQUEST.find({ status: 'pending' })
+        .populate('staffMember', 'staffName email role department')
+        .sort({ createdAt: 1 })
+        .lean()
+    return res.status(200).json({ requests })
+})
+
+// Approves or denies a shift request; approval creates a filled roster shift
+exports.resolveShiftRequest = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const { action, startTime, endTime } = req.body
+    if (!['approve', 'deny'].includes(action)) {
+        return res.status(400).json({ message: 'action must be approve or deny' })
+    }
+    const request = await SHIFT_REQUEST.findById(id)
+    if (!request) return res.status(404).json({ message: 'Shift request not found' })
+    // Prevent double-processing already resolved requests
+    if (request.status !== 'pending') {
+        return res.status(409).json({ message: 'Request has already been resolved' })
+    }
+
+    if (action === 'approve') {
+        // Allow manager to override requested times; fall back to the staff member's suggestion
+        const finalStart = startTime?.trim() || request.requestedStartTime || ''
+        const finalEnd   = endTime?.trim()   || request.requestedEndTime   || ''
+        if (!finalStart || !finalEnd) {
+            return res.status(400).json({ message: 'A start time and end time are required to approve a shift request.' })
+        }
+        request.requestedStartTime = finalStart
+        request.requestedEndTime   = finalEnd
+        request.status = 'approved'
+        await request.save()
+        // Create the actual roster shift now that the request is approved
+        const newShift = new SHIFT({
+            belongs_to: request.staffMember,
+            date: request.requestedDate,
+            shift_start_time: finalStart,
+            shift_end_time: finalEnd,
+            status: 'filled'
+        })
+        await newShift.save()
+
+        // Mirror the approved shift in the staff member's Google Calendar
+        const staffMember = await STAFF.findById(request.staffMember)
+        if (staffMember) {
+            const calEventId = await createShiftEvent(staffMember, newShift)
+            if (calEventId) {
+                newShift.googleCalendarEventId = calEventId
+                await newShift.save()
+            }
+        }
+
+        return res.status(200).json({ message: 'Request approved and shift added to roster' })
+    }
+
+    // Deny path — just update status, no shift is created
+    request.status = 'denied'
+    await request.save()
+    return res.status(200).json({ message: 'Request denied' })
 })

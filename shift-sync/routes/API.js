@@ -3,6 +3,7 @@ const router = express.Router()
 const jwt = require('jsonwebtoken')
 const rateLimit = require('express-rate-limit')
 
+// Rate-limiter applied to AI chat routes — 5 messages per minute per IP
 const chatRateLimit = rateLimit({
     windowMs : 60 * 1000,   // 1 minute window
     max : 5,               // 5 messages per minute
@@ -11,43 +12,55 @@ const chatRateLimit = rateLimit({
     message : { message : 'AI assistant is busy, please try again in a moment.' }
 })
 
+// Mongoose models used directly in inline route handlers
 const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 const TOKEN = require("../models/tokenSign")
 const CLCOKIN = require("../models/clockIn")
 
-const { manager_sign_up, manager_invite, swapFinalApproval, download_attendance } = require('../controllers/managerController')
+// Manager controller exports
+const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, resolveShiftRequest } = require('../controllers/managerController')
+// Staff controller exports
 const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut, registerFace } = require('../controllers/staffController')
-const { handleChat } = require('../controllers/aiController')
+// AI chat handlers for staff and manager
+const { handleChat, handleManagerChat } = require('../controllers/aiController')
 const SHIFT = require('../models/shift')
+// Smart Match — finds best available staff to cover an open shift
 const { findCoverCandidates } = require('../services/smartMatchService')
 const passport = require('passport')
+// Test mail helper
 const {testMail} = require('../controllers/sendMails')
 
+// Middleware: verifies a Bearer JWT in the Authorization header (used for manager routes)
 function authMiddleWare(req, res, next){
     console.log("Entered middleware")
     const authHeader = req.headers['authorization']
+    // Extract token from "Bearer <token>" format
     const token = authHeader && authHeader.split(" ")[1]
     console.log(authHeader)
     if(token == null) return res.sendStatus(401)
     jwt.verify(token, process.env.JWT_SECRET, (err, user)=>{
         if(err) return res.sendStatus(403)
+        // Attach decoded user payload so downstream handlers can read req.user
         req.user = user
         next()
     })
 }
 
+// Middleware: verifies staff auth from cookie, Authorization header, or URL query param
 async function staffAuthenticationWithCookies(req, res, next){
     let actualToken = '';
-    const urlToken = req.query.token;
-    const token = req.cookies?.auth;
+    const urlToken = req.query.token;           // token passed as ?token= query string
+    const token = req.cookies?.auth;            // token stored in the auth cookie
     const authHeader = req.headers['authorization']
     const authToken = authHeader && authHeader.split(" ")[1]
+    // Precedence: cookie → Authorization header → query param
     if(token != undefined && token.length > 0){actualToken = token}
     if(authToken != undefined && authToken.length > 0){actualToken = authToken}
     if(urlToken != undefined && urlToken.length > 0){actualToken = urlToken}
     if( actualToken.length == 0 ) return res.status(401).json({message : "Unauthorized"})
     try{
+        // Two-layer JWT: outer token wraps the real login token for extra tamper protection
         const topLevelToken = jwt.verify(actualToken, process.env.ROOT_SECRET_PASS)
         const userTOken = jwt.verify(topLevelToken.loginToken, process.env.JWT_SECRET)
         req.user = userTOken
@@ -59,8 +72,10 @@ async function staffAuthenticationWithCookies(req, res, next){
 
 //manager routes
 
+// Download attendance report as an Excel file (no auth — intentional for direct download links)
 router.get("/download-attendance", download_attendance)
 
+// Manager login — validates credentials via passport local strategy and returns a JWT
 router.post("/manager-login", (req, res, next)=>{
     passport.authenticate("manager-local", {session : false}, (err, user, info)=>{
         if(err){
@@ -69,28 +84,78 @@ router.post("/manager-login", (req, res, next)=>{
         if(!user){
             return res.status(400).json({message : "please check the email and password, and try again!"})
         }
+        // Issue a 24-hour JWT containing manager id and email
         const token = jwt.sign({id : user.id, email : user.email}, process.env.JWT_SECRET, {expiresIn : "24h"})
         return res.json({token, manager : user})
     })(req, res, next)
 })
 
+// Health-check endpoint — confirms the API router is mounted
 router.get("/", (req, res, next)=>{
     res.send("connected")
 })
 
+// Register a new manager account and organisation
 router.post("/manager-sign-up", manager_sign_up)
 
+// Invite staff member(s) by email — sends invite link via email
 router.post("/staff-add", authMiddleWare, manager_invite)
 
+// List all pending (unused) invite tokens
+router.get("/pending-invitations", authMiddleWare, get_pending_invitations)
+
+// Delete an invite token by its DB id, preventing further use
+router.delete("/revoke-invitation/:id", authMiddleWare, revoke_invitation)
+
+// Re-send the invite email for an existing token
+router.post("/resend-invitation/:id", authMiddleWare, resend_invitation)
+
+// Send a test email to verify transporter configuration
 router.post('/send-mail',authMiddleWare, testMail)
 
+// Manager approves a pending swap — sends confirmation emails to both staff members
 router.post("/swap-final-approval/:id", authMiddleWare, swapFinalApproval)
 
+// Manager denies a pending swap — deletes the swap shift record
+router.post("/deny-swap/:id", authMiddleWare, denySwap)
+
+// Returns all shifts currently in pending_swap status waiting for manager approval
 router.get("/pending-swaps", authMiddleWare, async (req, res)=>{
     const { getPendingSwaps } = require('../controllers/managerController');
     return getPendingSwaps(req, res);
 })
 
+// Returns all staff members with basic profile fields (name, email, dept, role)
+router.get("/manager-staff", authMiddleWare, getManagerStaff)
+
+// Returns roster shifts optionally filtered by date range
+router.get("/roster", authMiddleWare, getRoster)
+
+// Adds a new filled shift to the roster
+router.post("/roster", authMiddleWare, addRosterShift)
+
+// Removes a specific roster shift by id
+router.post("/roster/remove/:id", authMiddleWare, removeRosterShift)
+
+// Returns today's attendance ledger with clock-in/out times and late/overtime flags
+router.get("/today-ledger", authMiddleWare, getTodayLedger)
+
+// Returns the last 7 days of attendance counts vs expected headcount
+router.get("/weekly-attendance", authMiddleWare, getWeeklyAttendance)
+
+// Returns how many staff are currently on-shift vs total headcount
+router.get("/shift-stats", authMiddleWare, getShiftStats)
+
+// CRUD for organisation-defined roles stored on the Manager document
+router.get("/org-roles", authMiddleWare, getOrgRoles)
+router.post("/org-roles", authMiddleWare, addOrgRole)
+router.post("/org-roles/remove", authMiddleWare, removeOrgRole)
+
+// Retrieve and resolve staff-initiated shift requests
+router.get("/pending-shift-requests", authMiddleWare, getPendingShiftRequests)
+router.post("/shift-request-resolve/:id", authMiddleWare, resolveShiftRequest)
+
+// Returns the currently authenticated manager's full document
 router.get("/manager-auth", authMiddleWare, async (req, res)=>{
     const manager = await MANAGER.findById(req.user.id)
     return res.status(200).json({user : manager})
@@ -98,11 +163,13 @@ router.get("/manager-auth", authMiddleWare, async (req, res)=>{
 
 //staff routes
 
+// Returns the authenticated staff member's full document (used to restore session on page refresh)
 router.get("/staff-auth", staffAuthenticationWithCookies, async (req, res)=>{
     const userDetails = await STAFF.findById(req.user.id)
     return res.status(200).json({message : "Good to go", user : userDetails})
 })
 
+// Returns a single staff member's public profile by MongoDB id
 router.get("/see-staff/:id", staffAuthenticationWithCookies, async (req, res)=>{
     try{
         console.log(req.params.id)
@@ -117,30 +184,49 @@ router.get("/see-staff/:id", staffAuthenticationWithCookies, async (req, res)=>{
     }
 })
 
+// Returns all staff members plus the requesting user's own document
 router.get("/staff",staffAuthenticationWithCookies ,getListOfAllStaffMembers)
 
+// Validates the invite token before redirecting to account creation
 router.get("/join/:id", checkAuthentication)
 
+// Staff member initiates a shift swap request with another staff member
 router.post("/initiate-swap", staffAuthenticationWithCookies, initiateSwap)
 
+// Staff B confirms they accept the swap, forwarding it to manager for approval
 router.get("/staffB-accepts/:id", staffAuthenticationWithCookies, staffBAccepts)
 
+// Redirects a new staff member to Google OAuth after validating their invite token
 router.get("/create-staff-acc/:id", creatingStaffAccount)
 
-router.get("/staff-login", passport.authenticate("google", {scope : ['profile', 'email']}))
+// Kicks off Google OAuth login flow for staff (redirects to Google consent screen)
+// access_type:offline ensures a refresh token is issued so Calendar API calls can be made server-side
+router.get("/staff-login", passport.authenticate("google", {
+    scope : ['profile', 'email', 'https://www.googleapis.com/auth/calendar'],
+    accessType : 'offline',
+    prompt : 'consent'
+}))
 
+// Records a clock-in event with GPS and face verification data
 router.post("/staff-clock-in", staffAuthenticationWithCookies, staffClockIn)
 
+// Records a clock-out event, closing the matching open clock-in
 router.post("/staff-clock-out", staffAuthenticationWithCookies, staffClockOut)
 
+// Stores a staff member's 128-dimensional face descriptor for future verification
 router.post("/register-face", staffAuthenticationWithCookies, registerFace)
 
+// Google OAuth callback — links the Google profile to an existing Staff doc or creates one via invite
 router.get("/redirectURI", passport.authenticate("google", {failureRedirect : process.env.FRONTEND_URL + "/staff-login"}),async (req, res, next)=>{
     try{
         const {user} = req;
         const staffAccount = await STAFF.findOne({google_id : user.id})
         const state = req.query.state
         if(staffAccount){
+            // Returning user — refresh stored OAuth tokens then issue a nested JWT and redirect to the staff portal
+            staffAccount.googleAccessToken = user._accessToken
+            if(user._refreshToken) staffAccount.googleRefreshToken = user._refreshToken
+            await staffAccount.save()
             const loginToken = jwt.sign({id : staffAccount.id, email : staffAccount.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
             const topLevelToken = jwt.sign({loginToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
             const tokenInURl = new URLSearchParams({
@@ -148,40 +234,44 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : pr
             })
             return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${tokenInURl}`)
         }else if(state != undefined){
-            console.log(user)
+            // New user arriving via an invite link — create their Staff document
             const managerToken = await TOKEN.findById(state)
-            jwt.verify(managerToken.token, process.env.JWT_INVITE_SECRET, (err, token)=>{
-                jwt.verify(token.signed, process.env.JWT_SECRET, async(err, profile)=>{
-                    if(profile){
-                        const newUser = new STAFF({
-                            google_id : user.id, 
-                            email : user.emails?.[0]?.value, 
-                            staffName : user.displayName,
-                            profile_picture : user.photos?.[0]?.value
-                        })
-                        await newUser.save()
-                        const loginToken = jwt.sign({id : newUser.id, email : newUser.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
-                        const topLevelToken = jwt.sign({loginToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
-                        if(loginToken.length > 0){
-                            const deletion = await TOKEN.findByIdAndDelete(state)
-                        }
-                        const tokenInURL = new URLSearchParams({
-                            token : topLevelToken
-                        })
-                        return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${tokenInURL}`)
-                    }else{
-                        const msg= new URLSearchParams({
-                            error : "You are Not Permitted to do that!"
-                        })
-                        return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
-                    }
+            if(!managerToken){
+                const msg = new URLSearchParams({ error : "Invite link has already been used or has expired." })
+                return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
+            }
+            try{
+                // Verify the invite token's outer and inner JWTs before creating the account
+                const outerPayload = jwt.verify(managerToken.token, process.env.JWT_INVITE_SECRET)
+                jwt.verify(outerPayload.signed, process.env.JWT_SECRET)   // validate inner token — throws if invalid
+                const newUser = new STAFF({
+                    google_id : user.id,
+                    email : user.emails?.[0]?.value,
+                    staffName : user.displayName,
+                    profile_picture : user.photos?.[0]?.value,
+                    role : managerToken.role || 'Staff Member',
+                    department : managerToken.department || 'General',
+                    googleAccessToken : user._accessToken,
+                    googleRefreshToken : user._refreshToken || null
                 })
-            })
+                await newUser.save()
+                // Build a session token for the new user and redirect to face enrollment
+                const loginToken = jwt.sign({id : newUser.id, email : newUser.email}, process.env.JWT_SECRET, {expiresIn : '24h'})
+                const topLevelToken = jwt.sign({loginToken}, process.env.ROOT_SECRET_PASS, {expiresIn : '24h'})
+                // Burn the invite token after successful use
+                await TOKEN.findByIdAndDelete(state)
+                const tokenInURL = new URLSearchParams({ token : topLevelToken })
+                return res.redirect(`${process.env.FRONTEND_URL}/face-enroll?${tokenInURL}`)
+            }catch(inviteErr){
+                const msg = new URLSearchParams({ error : "Invite link is invalid or has expired. Ask your manager to resend." })
+                return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
+            }
         }
-        else{   
+        else{
+            // Google account not linked to any staff and no invite state — prompt for invite
             const msg = new URLSearchParams({
                 error : "Invite Required",
-                email : user.email
+                email : user.emails?.[0]?.value
             }).toString()
             return res.redirect(`${process.env.FRONTEND_URL}/staff-login?${msg}`)
         }
@@ -195,6 +285,7 @@ router.get("/redirectURI", passport.authenticate("google", {failureRedirect : pr
 
 // clockIn and clockOut routes
 
+// Returns a single clock-in record by id (for reviewing past clock-ins)
 router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=>{
     try{
         const clockInRecord = await CLCOKIN.findById(req.params.id)
@@ -207,6 +298,7 @@ router.get("/get-clockin/:id", staffAuthenticationWithCookies, async (req, res)=
     }
 })
 
+// Returns all clock-in records for a specific staff member
 router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req, res)=>{
     try{
         const clockInRecordsOfStaff = await CLCOKIN.find({staffMember : req.params.id})
@@ -216,12 +308,23 @@ router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req,
     }
 })
 
-// Org config — returns HQ coordinates for geo-fence (used by ClockIn/ClockOut)
+// Org config — returns HQ coordinates, org name, and roster type (used by ClockIn/ClockOut and roster UI)
 router.get("/org-config", staffAuthenticationWithCookies, async (req, res) => {
     try {
-        const manager = await MANAGER.findOne({ 'hq_coordinates.lat': { $ne: null } }, 'org_name hq_coordinates')
+        const manager = await MANAGER.findOne({ 'hq_coordinates.lat': { $ne: null } }, 'org_name hq_coordinates rosterType')
         if (!manager) return res.status(404).json({ message: "No organisation config found. Ask your manager to set HQ coordinates." })
-        return res.status(200).json({ org_name: manager.org_name, hq_coordinates: manager.hq_coordinates })
+        return res.status(200).json({ org_name: manager.org_name, hq_coordinates: manager.hq_coordinates, rosterType: manager.rosterType || 'weekly' })
+    } catch (err) {
+        return res.status(500).json({ message: "Server error" })
+    }
+})
+
+// Today's roster shift for the authenticated staff member
+router.get("/my-shift-today", staffAuthenticationWithCookies, async (req, res) => {
+    try {
+        const todayISO = new Date().toISOString().split('T')[0]
+        const shift = await SHIFT.findOne({ belongs_to: req.user.id, date: todayISO, status: 'filled' }).lean()
+        return res.status(200).json({ shift: shift || null })
     } catch (err) {
         return res.status(500).json({ message: "Server error" })
     }
@@ -231,6 +334,9 @@ router.get("/org-config", staffAuthenticationWithCookies, async (req, res) => {
 
 // NLP Shift Manager — staff sends a natural language message
 router.post("/chat", chatRateLimit, staffAuthenticationWithCookies, handleChat)
+
+// NLP Manager Assistant — manager sends a natural language message
+router.post("/manager-chat", chatRateLimit, authMiddleWare, handleManagerChat)
 
 // Smart Match — manager manually triggers cover search for an open shift
 router.post("/find-cover/:shiftId", authMiddleWare, async (req, res) => {
