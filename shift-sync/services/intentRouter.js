@@ -16,6 +16,9 @@ const { inviteMember } = require('../controllers/sendMails')
 // HTML builder for staff invite emails
 const { sendingToken } = require('../utils/mailHtmls')
 
+// Google Calendar sync — keeps staff calendars in step with roster changes made via AI chat
+const { createShiftEvent, deleteShiftEvent } = require('./googleCalendarService')
+
 // ── Staff intent router ──────────────────────────────────────────────────────
 
 // Dispatches a parsed staff intent to the appropriate DB operation and returns a user-facing result
@@ -240,8 +243,8 @@ function resolveStaffName(name, staffList) {
 async function routeManagerIntent(parsedIntent, managerId, managerToken) {
     try {
         const { intent } = parsedIntent
-        // Fetch the current staff list once; reused by all intent cases that need name resolution
-        const staffList = await STAFF.find({}).select('staffName _id email').lean()
+        // Fetch the current staff list once; includes OAuth tokens so Calendar sync doesn't need extra DB calls
+        const staffList = await STAFF.find({}).select('staffName _id email googleAccessToken googleRefreshToken').lean()
 
         // Log intent and org size before any DB work so failures have clear context
         console.log(`\n[ROUTER:MANAGER] Routing intent: "${intent}" | staff in org: ${staffList.length}`)
@@ -333,6 +336,14 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                         status: 'filled'
                     })
                     await newShift.save()
+
+                    // Mirror the shift in the staff member's Google Calendar
+                    const calEventId = await createShiftEvent(staff, newShift)
+                    if (calEventId) {
+                        newShift.googleCalendarEventId = calEventId
+                        await newShift.save()
+                    }
+
                     created.push(`${staff.staffName} on ${date} (${startTime}–${endTime})`)
                 }
 
@@ -383,6 +394,12 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                             ? `No filled shift found for ${staffName} on ${date}.`
                             : `No filled shift found on ${date}.`
                     }
+                }
+
+                // Remove the Google Calendar event before deleting the shift document
+                if (shift.googleCalendarEventId) {
+                    const staffDoc = staffList.find(s => String(s._id) === String(shift.belongs_to))
+                    if (staffDoc) await deleteShiftEvent(staffDoc, shift.googleCalendarEventId)
                 }
 
                 await shift.deleteOne()
@@ -505,7 +522,7 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                         }
 
                         console.log(`[ROUTER:MANAGER]   + ${staff.staffName} on ${date} (${template.start}–${template.end})`)
-                        await SHIFT.create({
+                        const newShift = await SHIFT.create({
                             belongs_to: staff._id,
                             date,
                             shift_start_time: template.start,
@@ -513,6 +530,11 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                             shift_length:     template.length,
                             status: 'filled'
                         })
+
+                        // Mirror each generated shift in the staff member's Google Calendar
+                        const calEventId = await createShiftEvent(staff, newShift)
+                        if (calEventId) await newShift.updateOne({ googleCalendarEventId: calEventId })
+
                         created.push(`${staff.staffName} on ${date}`)
                     }
                 }
