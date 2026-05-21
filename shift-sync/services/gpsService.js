@@ -3,7 +3,9 @@
  * Used by staffClockIn to detect drive-by punches and GPS spoofing.
  */
 
+// Speed threshold above which a clock-in is flagged as a drive-by punch
 const DRIVE_BY_THRESHOLD_MPH = parseFloat(process.env.DRIVE_BY_THRESHOLD_MPH) || 10
+// Mean radius of the Earth in metres, used by the Haversine formula
 const EARTH_RADIUS_METERS = 6371000
 
 /**
@@ -33,6 +35,7 @@ function haversineDistanceMeters(coord1, coord2) {
 function calculateVelocityMph(coord1, coord2, deltaMs) {
     if (deltaMs <= 0) return 0
     const distanceMeters = haversineDistanceMeters(coord1, coord2)
+    // Convert metres to miles and milliseconds to hours
     const distanceMiles = distanceMeters / 1609.344
     const hours = deltaMs / 3600000
     return distanceMiles / hours
@@ -83,6 +86,7 @@ function detectZeroVariance(gpsCoordinates) {
     if (!gpsCoordinates || gpsCoordinates.length < 2) return false
 
     const first = gpsCoordinates[0]
+    // Every sample must match the first exactly for the spoofing flag to trigger
     return gpsCoordinates.every(
         (coord) => coord.lat === first.lat && coord.lng === first.lng
     )

@@ -7,11 +7,15 @@
  * Step 3 — Notify the top 3 candidates by email
  */
 
+// Mongoose models used for eligibility filtering
 const STAFF = require('../models/staff')
 const CLOCKIN = require('../models/clockIn')
+// ML client for soft-score ranking of eligible candidates
 const { rankStaffForCoverage } = require('./mlService')
 
+// Weekly hours cap used to filter out staff who are already at their limit
 const MAX_WEEKLY_HOURS = 40
+// Maximum number of candidates to notify and return
 const TOP_N = 3
 
 /**
@@ -33,6 +37,7 @@ async function calculateWeeklyHours(staffId, weekStart, weekEnd) {
         dateClockedIn : { $gte : weekStart, $lte : weekEnd }
     }).lean()
 
+    // Sum shift durations from the stored start/end times on each clock-in record
     return records.reduce((total, record) => {
         const start = timeStringToHours(record.startOfShift)
         const end = timeStringToHours(record.endOfShift)
@@ -46,6 +51,7 @@ async function calculateWeeklyHours(staffId, weekStart, weekEnd) {
 function getWeekBounds(dateStr) {
     const d = new Date(dateStr || Date.now())
     const day = d.getDay()
+    // Compute the Monday of the same week
     const monday = new Date(d)
     monday.setDate(d.getDate() - ((day + 6) % 7))
     const sunday = new Date(monday)
@@ -64,6 +70,7 @@ function getWeekBounds(dateStr) {
 async function findCoverCandidates(openShift) {
     const shiftDate = openShift.date || openShift.shiftDate
     const { weekStart, weekEnd } = getWeekBounds(shiftDate)
+    // Calculate how many hours this shift adds to a candidate's weekly total
     const shiftHours = timeStringToHours(openShift.shift_end_time) - timeStringToHours(openShift.shift_start_time)
     const requiredRole = openShift.requiredRole || 'staff'
 
@@ -73,10 +80,11 @@ async function findCoverCandidates(openShift) {
     const shiftOwner = openShift.belongs_to
     const allStaff = await STAFF.find({ role : requiredRole, _id : { $ne : shiftOwner } }).lean()
 
-    // b. Find staff already clocked in on the shift date (already working)
+    // b. Find staff already clocked in on the shift date (already working that day)
     const alreadyWorkingIds = await CLOCKIN.distinct('staffMember', {
         dateClockedIn : shiftDate ? String(shiftDate) : { $exists : true }
     })
+    // Use a Set for O(1) membership checks during the eligibility loop
     const alreadyWorkingSet = new Set(alreadyWorkingIds.map(String))
 
     // c. Filter out staff already working or who would exceed weekly hours
@@ -91,12 +99,13 @@ async function findCoverCandidates(openShift) {
         const weeklyHours = await calculateWeeklyHours(staffIdStr, weekStart, weekEnd)
         if (weeklyHours + shiftHours > MAX_WEEKLY_HOURS) continue
 
-        // Build the feature payload for the ML ranker
+        // Build the feature payload for the ML ranker using recent clock-in history
         const history = await CLOCKIN.find({ staffMember : staff._id })
             .sort({ dateClockedIn : -1 })
             .limit(50)
             .lean()
 
+        // Each clock-in record represents an accepted shift — encode day/hour patterns for ML
         const acceptanceHistory = history.map((record) => {
             const d = new Date(record.dateClockedIn)
             return {
@@ -122,6 +131,7 @@ async function findCoverCandidates(openShift) {
     }
 
     // --- Step 2: ML Soft Scoring ---
+    // Default all candidates to a neutral score in case the ML service is unavailable
     let rankedCandidates = eligible.map((s, i) => ({ ...s, score : 0.5, rank : i + 1 }))
 
     const mlResult = await rankStaffForCoverage(
@@ -140,15 +150,18 @@ async function findCoverCandidates(openShift) {
         for (const r of mlResult.rankedCandidates) {
             scoreMap[r.staffId] = r.score
         }
+        // Re-rank by ML score descending; missing scores fall back to 0.5
         rankedCandidates = eligible
             .map((s) => ({ ...s, score : scoreMap[s.staffId] ?? 0.5 }))
             .sort((a, b) => b.score - a.score)
             .map((s, i) => ({ ...s, rank : i + 1 }))
     }
 
+    // Slice the top N for notification
     const top = rankedCandidates.slice(0, TOP_N)
 
     // --- Step 3: Notify top candidates ---
+    // Build the notification payload expected by notifyCoverCandidates
     const notifyPayload = top.map((c) => ({
         email : c.email,
         staffName : c.staffName,
@@ -158,6 +171,7 @@ async function findCoverCandidates(openShift) {
         score : c.score
     }))
 
+    // Emit a socket event so the manager dashboard shows the open shift in real time
     try {
         const io = require('../utils/socket').getIO();
         io.emit('shift_open', { shift: openShift, candidates: top });
@@ -165,6 +179,7 @@ async function findCoverCandidates(openShift) {
         console.error('Socket error on shift_open emit:', socketErr);
     }
 
+    // Return only the fields needed by callers (controllers, intent router)
     return top.map((c) => ({
         staffId : c.staffId,
         staffName : c.staffName,

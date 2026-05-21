@@ -1,4 +1,5 @@
 
+// Returns the HTML string for the staff invite email; token is the invite token DB id used to build the acceptance URL
 function sendingToken(token){
   return `
   <!DOCTYPE html>
@@ -14,7 +15,7 @@ function sendingToken(token){
             <table width="600" style="background-color: #ffffff; padding: 20px; border-radius: 8px;">
               <tr>
                 <td align="center" style="font-size: 20px; font-weight: bold; color: #333;">
-                  You’ve been invited!
+                  You've been invited!
                 </td>
               </tr>
               <tr>
@@ -24,9 +25,9 @@ function sendingToken(token){
               </tr>
               <tr>
                 <td align="center" style="padding: 20px;">
-                  <a href=${process.env.BASE_URL}/api/create-staff-acc/${token}
-                    style="background-color: #007BFF; color: #ffffff; padding: 12px 24px; 
-                            text-decoration: none; border-radius: 5px; font-size: 16px; 
+                  <a href="${process.env.BASE_URL}/api/create-staff-acc/${token}"
+                    style="background-color: #007BFF; color: #ffffff; padding: 12px 24px;
+                            text-decoration: none; border-radius: 5px; font-size: 16px;
                             display: inline-block;">
                     Accept Invitation
                   </a>
@@ -43,8 +44,9 @@ function sendingToken(token){
       </table>
     </body>
   </html>`
-} 
+}
 
+// Returns the HTML string for the shift swap request email sent to Staff B; data contains both staff and shift details
 function initiateSwap(data){
   return `
   <!DOCTYPE html>
@@ -86,7 +88,7 @@ function initiateSwap(data){
         </table>
 
         <p style="margin-top:16px;">
-          If you <strong>Agree</strong>, we’ll send your consent to the manager.
+          If you <strong>Agree</strong>, we'll send your consent to the manager.
           If you <strong>Reject</strong>, the request will be closed.
         </p>
 
@@ -110,7 +112,7 @@ function initiateSwap(data){
           <li>Your choice is recorded and sent to the manager.</li>
           <li>Manager reviews and <strong>Approves/Declines</strong> the swap.</li>
           <li>If approved, both schedules and calendar events are automatically updated.</li>
-          <li>You’ll get a confirmation email of the final decision.</li>
+          <li>You'll get a confirmation email of the final decision.</li>
         </ul>
 
         <p style="margin-top:22px;">Thanks,<br><strong>Shift-Sync</strong></p>
@@ -125,6 +127,7 @@ function initiateSwap(data){
   `
 }
 
+// Returns the confirmation email HTML sent to Staff B after they accept the swap
 function staffBConfirmationMail(data){
   return `
     <!DOCTYPE html>
@@ -136,7 +139,7 @@ function staffBConfirmationMail(data){
         <p>Hi <strong>${data.swap_belongs_to}</strong>,</p>
 
         <p>
-          You’ve <strong>agreed</strong> to swap your shift with <strong>${data.belongs_to}</strong>.  
+          You've <strong>agreed</strong> to swap your shift with <strong>${data.belongs_to}</strong>.
           Your confirmation has been successfully recorded and forwarded to your manager for review.
         </p>
 
@@ -165,15 +168,15 @@ function staffBConfirmationMail(data){
         </table>
 
         <p style="margin-top:16px;">
-          Your request is now <strong>Pending Manager Approval</strong>.  
-          Once the manager reviews and approves, you’ll receive a final confirmation email.
+          Your request is now <strong>Pending Manager Approval</strong>.
+          Once the manager reviews and approves, you'll receive a final confirmation email.
         </p>
 
         <h4 style="margin:0 0 8px;">What happens next?</h4>
         <ul style="margin:0 0 20px 18px; padding:0;">
           <li>The manager will review the swap details.</li>
           <li>If approved, both your schedules and calendar events will be automatically updated.</li>
-          <li>If declined, you’ll retain your original shift.</li>
+          <li>If declined, you'll retain your original shift.</li>
         </ul>
 
         <p style="margin-top:20px;">Thanks for your quick response,<br>
@@ -181,8 +184,8 @@ function staffBConfirmationMail(data){
 
         <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
         <small style="color:#777;">
-          This is an automated message. Please do not reply directly.  
-          You’ll be notified once your manager makes a decision.
+          This is an automated message. Please do not reply directly.
+          You'll be notified once your manager makes a decision.
         </small>
       </div>
     </body>
@@ -190,6 +193,7 @@ function staffBConfirmationMail(data){
 `
 }
 
+// Returns the swap approval request email HTML sent to the manager for final sign-off
 function emailReviewToManager(data){
   return `
   <!DOCTYPE html>
@@ -231,7 +235,7 @@ function emailReviewToManager(data){
         </table>
 
         <p style="margin-top:16px;">
-          <strong>Status:</strong> ${data.swap_belongs_to} has <span style="color:green;">agreed</span> to the swap.  
+          <strong>Status:</strong> ${data.swap_belongs_to} has <span style="color:green;">agreed</span> to the swap.
           Please confirm whether to <strong>approve</strong> or <strong>decline</strong> the swap below.
         </p>
 
@@ -257,7 +261,7 @@ function emailReviewToManager(data){
 
         <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
         <small style="color:#777;">
-          This is an automated email from Shift-Sync.  
+          This is an automated email from Shift-Sync.
           Please do not reply directly.
         </small>
       </div>
@@ -266,6 +270,7 @@ function emailReviewToManager(data){
   `
 }
 
+// Returns the email HTML sent to Staff A notifying them that Staff B has accepted and the swap is pending manager review
 function staffAConfirmationMail(data){
   return `
     <!DOCTYPE html>
@@ -277,7 +282,7 @@ function staffAConfirmationMail(data){
         <p>Hi <strong>${data.belongs_to}</strong>,</p>
 
         <p>
-          Great news — <strong>${data.swap_belongs_to}</strong> has <span style="color:green;">accepted</span> your request to swap shifts.  
+          Great news — <strong>${data.swap_belongs_to}</strong> has <span style="color:green;">accepted</span> your request to swap shifts.
           The request has now been forwarded to your manager for final review and approval.
         </p>
 
@@ -306,7 +311,7 @@ function staffAConfirmationMail(data){
         </table>
 
         <p style="margin-top:16px;">
-          ${data.manager} will now review the request. Once they make a decision, you’ll receive an automatic
+          ${data.manager} will now review the request. Once they make a decision, you'll receive an automatic
           email confirming whether the swap has been <strong>approved</strong> or <strong>declined</strong>.
         </p>
 
@@ -314,7 +319,7 @@ function staffAConfirmationMail(data){
         <ul style="margin:0 0 20px 18px; padding:0;">
           <li>Your request is <strong>awaiting manager approval</strong>.</li>
           <li>If approved, your schedule and calendar will update automatically.</li>
-          <li>If declined, you’ll keep your original shift and receive a notification.</li>
+          <li>If declined, you'll keep your original shift and receive a notification.</li>
         </ul>
 
         <p style="margin-top:20px;">Thanks for using <strong>Shift-Sync</strong>!<br>
@@ -322,8 +327,8 @@ function staffAConfirmationMail(data){
 
         <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
         <small style="color:#777;">
-          This is an automated message. Please do not reply directly.  
-          You’ll receive another update once your manager makes a decision.
+          This is an automated message. Please do not reply directly.
+          You'll receive another update once your manager makes a decision.
         </small>
       </div>
     </body>
@@ -331,6 +336,7 @@ function staffAConfirmationMail(data){
   `
 }
 
+// Returns the approval confirmation email HTML sent to each staff member after the manager approves the swap
 function managerConfirmationMail(data){
   return `
     <!DOCTYPE html>
@@ -374,7 +380,7 @@ function managerConfirmationMail(data){
         <ul style="margin:0 0 20px 18px; padding:0;">
           <li>Manager: <strong>${data.manager_name}</strong> has approved your swap.</li>
           <li>Shift changes have been applied automatically.</li>
-          <li>You’ll receive reminders for your new shift timings as usual.</li>
+          <li>You'll receive reminders for your new shift timings as usual.</li>
         </ul>
 
         <p style="margin-top:20px;">Thanks for keeping your team coordinated,<br>
@@ -382,7 +388,7 @@ function managerConfirmationMail(data){
 
         <hr style="border:none; border-top:1px solid #eee; margin-top:30px;">
         <small style="color:#777;">
-          This is an automated message from Shift-Sync.  
+          This is an automated message from Shift-Sync.
           Please do not reply directly.
         </small>
       </div>
@@ -391,7 +397,9 @@ function managerConfirmationMail(data){
   `
 }
 
+// Returns the GPS fraud alert email HTML; data contains staffName, velocityMph, and boolean flags
 function gpsFlagAlert(data) {
+  // Build a human-readable list of the specific GPS flags that were raised
   const flags = []
   if (data.isDriveByPunch) flags.push(`Drive-by punch detected — speed recorded: <strong>${data.velocityMph} mph</strong>`)
   if (data.isSpoofedGPS) flags.push('Zero-variance GPS detected — coordinates are suspiciously identical across all polls')
@@ -439,6 +447,7 @@ function gpsFlagAlert(data) {
   `
 }
 
+// Returns the shift cover notification email HTML sent to a candidate staff member identified by Smart Match
 function shiftCoverNotification(data) {
   return `
   <!DOCTYPE html>
@@ -486,4 +495,55 @@ function shiftCoverNotification(data) {
   `
 }
 
-module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, managerConfirmationMail, staffAConfirmationMail, gpsFlagAlert, shiftCoverNotification }
+// Returns the face mismatch alert email HTML sent to managers when clock-in face verification fails
+function faceMismatchAlert(data) {
+  return `
+  <!DOCTYPE html>
+  <html lang="en">
+    <body style="font-family: Arial, sans-serif; background:#f8f9fa; padding:20px; color:#333;">
+      <div style="max-width:650px; margin:auto; background:#fff; padding:24px; border-radius:10px; border-left: 5px solid #f59e0b;">
+        <h2 style="color:#b45309; margin-top:0;">&#9888; Face Verification Failed</h2>
+
+        <p>Hi <strong>${data.managerName}</strong>,</p>
+
+        <p>
+          A clock-in was recorded for <strong>${data.staffName}</strong>, but the face captured at
+          clock-in did not match their enrolled face. This may indicate a buddy-punch attempt.
+        </p>
+
+        <h3 style="margin:18px 0 10px;">Clock-In Details</h3>
+        <table style="width:100%; border-collapse:collapse;">
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Staff Member</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.staffName}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Date</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.dateClockedIn}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Time</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.timeClockedIn}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Shift</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.startOfShift} – ${data.endOfShift}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border:1px solid #ddd; font-weight:bold;">Face Distance</td>
+            <td style="padding:8px; border:1px solid #ddd;">${data.distance} <span style="color:#777;">(threshold: ${data.threshold})</span></td>
+          </tr>
+        </table>
+
+        <p style="margin-top:16px; color:#777; font-size:13px;">
+          The clock-in has been recorded normally. Please review and take any necessary action.
+        </p>
+
+        <p style="margin-top:20px;">Regards,<br><strong>Shift-Sync System</strong></p>
+      </div>
+    </body>
+  </html>
+  `
+}
+
+module.exports = { sendingToken, initiateSwap, staffBConfirmationMail, emailReviewToManager, managerConfirmationMail, staffAConfirmationMail, gpsFlagAlert, shiftCoverNotification, faceMismatchAlert }

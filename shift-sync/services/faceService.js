@@ -4,6 +4,7 @@
  * All descriptor extraction runs in the browser (face-api.js / TensorFlow.js).
  */
 
+// Distance below this value means the two face descriptors belong to the same person
 const FACE_MATCH_THRESHOLD = 0.4   // standard face-api.js threshold for a positive match
 
 /**

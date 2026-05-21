@@ -1,12 +1,17 @@
+// Nodemailer for sending transactional emails via Gmail SMTP
 const nodemailer = require('nodemailer')
+// Wraps async functions and forwards thrown errors to Express error handler
 const asyncHandler = require('express-async-handler')
-const { gpsFlagAlert, shiftCoverNotification } = require('../utils/mailHtmls')
+// HTML email template builders for alert and notification emails
+const { gpsFlagAlert, shiftCoverNotification, faceMismatchAlert } = require('../utils/mailHtmls')
 
+// Gmail credentials pulled from environment variables
 const {
     GMAIL,
     GMAIL_PASSWORD
 } = process.env
 
+// Shared nodemailer transporter used by all export functions in this module
 const transporter = nodemailer.createTransport({
     service : "gmail",
     auth : {
@@ -15,6 +20,7 @@ const transporter = nodemailer.createTransport({
     }
 })
 
+// Development/test route handler — sends a hardcoded test email to verify transporter works
 exports.testMail = asyncHandler(async(req, res)=>{
     try{
         const mailService = await transporter.sendMail({
@@ -39,6 +45,7 @@ exports.testMail = asyncHandler(async(req, res)=>{
     }
 })
 
+// Sends a staff invite email; data contains { to, subject, text, html }
 exports.inviteMember = asyncHandler(async (data)=>{
     try{
         const mailService = await transporter.sendMail({
@@ -54,6 +61,7 @@ exports.inviteMember = asyncHandler(async (data)=>{
     }
 })
 
+// Sends the initial shift swap request email to Staff B with the agree/reject action links
 exports.swapInitiate = asyncHandler(async (data)=>{
     try{
         const mailService = await transporter.sendMail({
@@ -68,6 +76,7 @@ exports.swapInitiate = asyncHandler(async (data)=>{
     }
 })
 
+// Sends a swap confirmation email to a staff member (used for both Staff A and Staff B)
 exports.staffConfirmationEmail = asyncHandler(async (data)=>{
     try{
         const mailService = await transporter.sendMail({
@@ -82,6 +91,7 @@ exports.staffConfirmationEmail = asyncHandler(async (data)=>{
     }
 })
 
+// Forwards the swap request to the manager's email for final approval
 exports.swapForwardToManagerEmail = asyncHandler(async (data)=>{
     try{
         const mailService = await transporter.sendMail({
@@ -96,6 +106,7 @@ exports.swapForwardToManagerEmail = asyncHandler(async (data)=>{
     }
 })
 
+// Sends a GPS fraud alert email to a single manager; called after a suspicious clock-in
 exports.notifyManagerGpsFlag = async (managerEmail, alertData) => {
     try{
         const bodyHTML = gpsFlagAlert(alertData)
@@ -110,9 +121,26 @@ exports.notifyManagerGpsFlag = async (managerEmail, alertData) => {
     }
 }
 
+// Sends a face mismatch alert email to a single manager when face verification fails at clock-in
+exports.notifyManagerFaceMismatch = async (managerEmail, alertData) => {
+    try {
+        const bodyHTML = faceMismatchAlert(alertData)
+        await transporter.sendMail({
+            from    : GMAIL,
+            to      : managerEmail,
+            subject : `Face Verification Failed: ${alertData.staffName} — ${alertData.dateClockedIn}`,
+            html    : bodyHTML
+        })
+    } catch(err) {
+        console.error('Face mismatch email failed:', err.message)
+    }
+}
+
+// Sends shift coverage opportunity emails to each candidate returned by Smart Match
 exports.notifyCoverCandidates = async (candidates) => {
     for(const candidate of candidates){
         try{
+            // Build a personalised email for each candidate including their match score
             const bodyHTML = shiftCoverNotification({
                 staffName : candidate.staffName,
                 shiftDate : candidate.shiftDate,
@@ -132,6 +160,7 @@ exports.notifyCoverCandidates = async (candidates) => {
     }
 }
 
+// Sends the manager's final swap approval email to a staff member; data.data contains { to, bodyHTML }
 exports.managerConfirmationEmail = asyncHandler(async (data)=>{
     try{
         const { to, bodyHTML } = data.data
