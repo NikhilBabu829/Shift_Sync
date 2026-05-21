@@ -3,6 +3,7 @@
 const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 const SHIFT = require("../models/shift")
+const SHIFT_REQUEST = require('../models/shiftRequest')
 const TOKEN = require("../models/tokenSign")
 const bcrypt = require('bcryptjs')
 // Wraps async route handlers and forwards thrown errors to Express error handler
@@ -410,4 +411,40 @@ exports.staffClockOut = asyncHandler(async (req, res)=>{
         console.log(err)
         return res.status(400).json(err)
     }
+})
+
+// Returns all shift proposals sent to the authenticated staff member by the manager (status: 'proposed').
+// Shown in the staff dashboard so the staff member can accept or decline.
+exports.getMyShiftProposals = asyncHandler(async (req, res) => {
+    const proposals = await SHIFT_REQUEST.find({ staffMember: req.user.id, status: 'proposed' })
+        .sort({ createdAt: -1 })
+        .lean()
+    return res.status(200).json({ proposals })
+})
+
+// Staff member responds to a manager's proposed shift time.
+// 'accept' moves the request to 'staff_agreed' (manager still needs to confirm to finalise the roster).
+// 'deny'   moves it to 'denied' so the manager knows the proposal was rejected.
+exports.respondToShiftProposal = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const { action } = req.body
+    if (!['accept', 'deny'].includes(action)) {
+        return res.status(400).json({ message: 'action must be accept or deny' })
+    }
+    const request = await SHIFT_REQUEST.findById(id)
+    if (!request) return res.status(404).json({ message: 'Proposal not found' })
+    // Only the staff member who submitted the original request may respond
+    if (String(request.staffMember) !== String(req.user.id)) {
+        return res.status(403).json({ message: 'This proposal does not belong to you' })
+    }
+    if (request.status !== 'proposed') {
+        return res.status(409).json({ message: 'This proposal has already been responded to' })
+    }
+    request.status = action === 'accept' ? 'staff_agreed' : 'denied'
+    await request.save()
+    return res.status(200).json({
+        message: action === 'accept'
+            ? 'Shift accepted — your manager will confirm shortly'
+            : 'Shift proposal declined'
+    })
 })

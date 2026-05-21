@@ -19,9 +19,9 @@ const TOKEN = require("../models/tokenSign")
 const CLCOKIN = require("../models/clockIn")
 
 // Manager controller exports
-const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, resolveShiftRequest } = require('../controllers/managerController')
+const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, proposeShiftTime, resolveShiftRequest } = require('../controllers/managerController')
 // Staff controller exports
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut, registerFace } = require('../controllers/staffController')
+const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut, registerFace, getMyShiftProposals, respondToShiftProposal } = require('../controllers/staffController')
 // AI chat handlers for staff and manager
 const { handleChat, handleManagerChat } = require('../controllers/aiController')
 const SHIFT = require('../models/shift')
@@ -151,9 +151,17 @@ router.get("/org-roles", authMiddleWare, getOrgRoles)
 router.post("/org-roles", authMiddleWare, addOrgRole)
 router.post("/org-roles/remove", authMiddleWare, removeOrgRole)
 
-// Retrieve and resolve staff-initiated shift requests
+// Retrieve shift requests that need manager action (pending + staff_agreed)
 router.get("/pending-shift-requests", authMiddleWare, getPendingShiftRequests)
+// Manager sends a time proposal back to the staff member (moves request to 'proposed')
+router.post("/shift-request-propose/:id", authMiddleWare, proposeShiftTime)
+// Manager confirms a staff-agreed proposal or denies any unresolved request
 router.post("/shift-request-resolve/:id", authMiddleWare, resolveShiftRequest)
+
+// Staff views proposals sent to them by the manager
+router.get("/my-shift-proposals", staffAuthenticationWithCookies, getMyShiftProposals)
+// Staff accepts or denies a manager's time proposal
+router.post("/shift-proposal-respond/:id", staffAuthenticationWithCookies, respondToShiftProposal)
 
 // Returns the currently authenticated manager's full document
 router.get("/manager-auth", authMiddleWare, async (req, res)=>{

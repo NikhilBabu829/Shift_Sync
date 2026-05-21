@@ -227,6 +227,38 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
                 if((mailToStaffA.accepted && mailToStaffA.accepted.length > 0) && (mailToStaffB.accepted && mailToStaffB.accepted.length > 0)){
                     // Only update the DB status after both emails are confirmed delivered
                     await SHIFT.findByIdAndUpdate(id, { status: 'approved' })
+
+                    // Normalise a stored date value to YYYY-MM-DD for DB queries
+                    const toISO = (v) => {
+                        if (!v) return null
+                        const d = v instanceof Date ? v : new Date(v)
+                        return isNaN(d) ? String(v).split('T')[0] : d.toISOString().split('T')[0]
+                    }
+                    const dateA = toISO(shiftDetails.date)       // Staff A's original date
+                    const dateB = toISO(shiftDetails.swapDate)   // Staff B's original date
+
+                    // Find both filled shifts so we can swap ownership and update Calendar events
+                    const shiftA = dateA ? await SHIFT.findOne({ belongs_to: staffA._id, date: dateA, status: 'filled' }) : null
+                    const shiftB = dateB ? await SHIFT.findOne({ belongs_to: staffB._id, date: dateB, status: 'filled' }) : null
+
+                    // Delete Staff A's old Calendar event then create one for Staff B on that date
+                    if (shiftA) {
+                        if (shiftA.googleCalendarEventId) await deleteShiftEvent(staffA, shiftA.googleCalendarEventId)
+                        shiftA.belongs_to = staffB._id
+                        const newIdA = await createShiftEvent(staffB, shiftA)
+                        shiftA.googleCalendarEventId = newIdA || null
+                        await shiftA.save()
+                    }
+
+                    // Delete Staff B's old Calendar event then create one for Staff A on that date
+                    if (shiftB) {
+                        if (shiftB.googleCalendarEventId) await deleteShiftEvent(staffB, shiftB.googleCalendarEventId)
+                        shiftB.belongs_to = staffA._id
+                        const newIdB = await createShiftEvent(staffA, shiftB)
+                        shiftB.googleCalendarEventId = newIdB || null
+                        await shiftB.save()
+                    }
+
                     return res.status(200).json({
                         message : "Mail has been sent successfully"
                     })
@@ -535,51 +567,69 @@ exports.download_attendance = asyncHandler(async (req, res)=>{
     }
 })
 
-// Returns all pending shift requests sorted by submission time for manager review
+// Returns shift requests that need manager attention: new pending requests and staff-agreed proposals awaiting confirmation
 exports.getPendingShiftRequests = asyncHandler(async (req, res) => {
-    const requests = await SHIFT_REQUEST.find({ status: 'pending' })
+    const requests = await SHIFT_REQUEST.find({ status: { $in: ['pending', 'staff_agreed'] } })
         .populate('staffMember', 'staffName email role department')
         .sort({ createdAt: 1 })
         .lean()
     return res.status(200).json({ requests })
 })
 
-// Approves or denies a shift request; approval creates a filled roster shift
-exports.resolveShiftRequest = asyncHandler(async (req, res) => {
+// Sends a time proposal back to the staff member instead of directly approving their request.
+// The request moves to 'proposed' status and the staff member can then accept or decline.
+exports.proposeShiftTime = asyncHandler(async (req, res) => {
     const { id } = req.params
-    const { action, startTime, endTime } = req.body
-    if (!['approve', 'deny'].includes(action)) {
-        return res.status(400).json({ message: 'action must be approve or deny' })
+    const { startTime, endTime } = req.body
+    if (!startTime || !endTime) {
+        return res.status(400).json({ message: 'startTime and endTime are required' })
     }
     const request = await SHIFT_REQUEST.findById(id)
     if (!request) return res.status(404).json({ message: 'Shift request not found' })
-    // Prevent double-processing already resolved requests
     if (request.status !== 'pending') {
+        return res.status(409).json({ message: 'Can only propose times for a pending request' })
+    }
+    request.proposedStartTime = startTime.trim()
+    request.proposedEndTime   = endTime.trim()
+    request.status = 'proposed'
+    await request.save()
+    return res.status(200).json({ message: 'Time proposal sent to staff member for review' })
+})
+
+// Confirms or denies a shift request at the final manager step.
+// 'confirm' only works on staff_agreed requests (staff has already accepted the proposal).
+// 'deny' works on any unresolved status so the manager can reject at any stage.
+exports.resolveShiftRequest = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const { action } = req.body
+    if (!['confirm', 'deny'].includes(action)) {
+        return res.status(400).json({ message: 'action must be confirm or deny' })
+    }
+    const request = await SHIFT_REQUEST.findById(id)
+    if (!request) return res.status(404).json({ message: 'Shift request not found' })
+    if (['approved', 'denied'].includes(request.status)) {
         return res.status(409).json({ message: 'Request has already been resolved' })
     }
 
-    if (action === 'approve') {
-        // Allow manager to override requested times; fall back to the staff member's suggestion
-        const finalStart = startTime?.trim() || request.requestedStartTime || ''
-        const finalEnd   = endTime?.trim()   || request.requestedEndTime   || ''
-        if (!finalStart || !finalEnd) {
-            return res.status(400).json({ message: 'A start time and end time are required to approve a shift request.' })
+    if (action === 'confirm') {
+        // Only finalise once the staff member has agreed to the proposed times
+        if (request.status !== 'staff_agreed') {
+            return res.status(409).json({ message: 'Cannot confirm — staff has not yet agreed to the proposed times' })
         }
-        request.requestedStartTime = finalStart
-        request.requestedEndTime   = finalEnd
         request.status = 'approved'
         await request.save()
-        // Create the actual roster shift now that the request is approved
+
+        // Create the roster shift using the times agreed in the proposal
         const newShift = new SHIFT({
             belongs_to: request.staffMember,
             date: request.requestedDate,
-            shift_start_time: finalStart,
-            shift_end_time: finalEnd,
+            shift_start_time: request.proposedStartTime,
+            shift_end_time:   request.proposedEndTime,
             status: 'filled'
         })
         await newShift.save()
 
-        // Mirror the approved shift in the staff member's Google Calendar
+        // Mirror the confirmed shift in the staff member's Google Calendar
         const staffMember = await STAFF.findById(request.staffMember)
         if (staffMember) {
             const calEventId = await createShiftEvent(staffMember, newShift)
@@ -589,10 +639,10 @@ exports.resolveShiftRequest = asyncHandler(async (req, res) => {
             }
         }
 
-        return res.status(200).json({ message: 'Request approved and shift added to roster' })
+        return res.status(200).json({ message: 'Shift confirmed and added to roster' })
     }
 
-    // Deny path — just update status, no shift is created
+    // Deny path — update status only, no shift is created
     request.status = 'denied'
     await request.save()
     return res.status(200).json({ message: 'Request denied' })
