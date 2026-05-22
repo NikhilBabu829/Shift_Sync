@@ -13,7 +13,7 @@ const passport = require('passport')
 // HTML template builders for swap-related emails
 const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfirmationMail } = require('../utils/mailHtmls')
 // Mail-sending helpers for swap workflow
-const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail, notifyManagerGpsFlag, notifyManagerFaceMismatch } = require('./sendMails')
+const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail, notifyManagerGpsFlag, notifyManagerFaceMismatch, swapDeclineNotifyStaffA } = require('./sendMails')
 // GPS fraud detection utilities (pure math, no I/O)
 const { runVelocityChecks, detectZeroVariance } = require('../services/gpsService')
 const { sendPushToMany } = require('../utils/webPush')
@@ -255,6 +255,60 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
     }
 })
 
+// Staff B declines a pending swap request — deletes the shift record and emails Staff A
+exports.staffBDeclines = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const toDisplayDate = (v) => {
+        if (!v) return ''
+        const s = String(v)
+        const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(s + 'T00:00:00') : new Date(s)
+        return isNaN(d) ? s : d.toDateString()
+    }
+    try {
+        const shiftDetails = await SHIFT.findById(id)
+        if (!shiftDetails) return res.status(404).json({ message: 'Swap request not found or already resolved.' })
+
+        const [staffB, staffA] = await Promise.all([
+            STAFF.findById(shiftDetails.swap_belongs_to),
+            STAFF.findById(shiftDetails.belongs_to)
+        ])
+
+        if (!staffB || staffB.id !== req.user.id) {
+            return res.status(401).json({ message: 'You are not authorised to decline this swap.' })
+        }
+
+        // Delete the pending swap record so it disappears from the manager's queue
+        await SHIFT.findByIdAndDelete(id)
+
+        // Notify Staff A by email (best-effort — don't block the response on mail failure)
+        swapDeclineNotifyStaffA({
+            staffAEmail: staffA.email,
+            staffAName: staffA.staffName,
+            staffBName: staffB.staffName,
+            date: toDisplayDate(shiftDetails.date),
+            shift_start_time: shiftDetails.shift_start_time,
+            shift_end_time: shiftDetails.shift_end_time,
+            swapDate: toDisplayDate(shiftDetails.swapDate),
+            swap_shift_start_time: shiftDetails.swap_shift_start_time,
+            swap_shift_end_time: shiftDetails.swap_shift_end_time
+        })
+
+        // Real-time notification to Staff A if they're online
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${staffA.id}`).emit('swap_declined', {
+                staffBName: staffB.staffName,
+                date: toDisplayDate(shiftDetails.date)
+            })
+        } catch { /* non-critical */ }
+
+        return res.status(200).json({ message: 'Swap request declined. The requester has been notified.' })
+    } catch (err) {
+        console.log(err)
+        return res.status(500).json({ message: 'Something went wrong. Please try again.' })
+    }
+})
+
 // Records a staff clock-in with GPS and face verification; enforces roster, dedup, and early-window rules
 exports.staffClockIn = asyncHandler(async (req, res)=>{
     try{
@@ -349,6 +403,22 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
         const response = { msg : "Your Clock-in has been accepted", faceVerification }
         if(isDriveByPunch || isSpoofedGPS) response.gpsWarning = true
         res.status(200).json(response)
+
+        // --- Broadcast clock-in to manager dashboard in real time ---
+        try {
+            const clockedInStaff = await STAFF.findById(req.user.id).select('staffName role department')
+            const io = require('../utils/socket').getIO()
+            io.to('managers').emit('staff_clocked_in', {
+                _id           : dataEntry._id,
+                name          : clockedInStaff?.staffName || 'Staff',
+                role          : clockedInStaff?.role || '',
+                dept          : clockedInStaff?.department || '',
+                shift         : `${assignedShift.shift_start_time} – ${assignedShift.shift_end_time}`,
+                status        : isLate ? 'LATE IN' : 'ON TIME',
+                timeClockedIn : dataEntry.timeClockedIn,
+                timeClockedOut: null,
+            })
+        } catch { /* socket unavailable — manager dashboard will show on next refresh */ }
 
         // --- Notify managers if flagged (non-blocking, runs after response) ---
         if(isDriveByPunch || isSpoofedGPS || faceVerification.isVerified === false){

@@ -17,11 +17,12 @@ const STAFF = require('../models/staff')
 const MANAGER = require('../models/manager')
 const TOKEN = require("../models/tokenSign")
 const CLCOKIN = require("../models/clockIn")
+const CLOCKOUT = require("../models/clockOut")
 
 // Manager controller exports
-const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, proposeShiftTime, resolveShiftRequest } = require('../controllers/managerController')
+const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, proposeShiftTime, resolveShiftRequest, getOrgLocations, addOrgLocation, removeOrgLocation } = require('../controllers/managerController')
 // Staff controller exports
-const { checkAuthentication, simulatingUIForAccCreation, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffClockIn, staffClockOut, registerFace, getMyShiftProposals, respondToShiftProposal } = require('../controllers/staffController')
+const { checkAuthentication, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffBDeclines, staffClockIn, staffClockOut, registerFace, getMyShiftProposals, respondToShiftProposal, claimOpenShift } = require('../controllers/staffController')
 // AI chat handlers for staff and manager
 const { handleChat, handleManagerChat } = require('../controllers/aiController')
 const SHIFT = require('../models/shift')
@@ -30,6 +31,10 @@ const { findCoverCandidates } = require('../services/smartMatchService')
 const passport = require('passport')
 // Test mail helper
 const {testMail} = require('../controllers/sendMails')
+// Leave request handlers (staff submit + manager approve/deny/revoke/register)
+const { submitLeaveRequest, getMyLeaveRequests, getPendingLeaveRequests, approveLeaveRequest, denyLeaveRequest, getAllLeaveRequests, revokeLeaveRequest } = require('../controllers/leaveController')
+// Availability handlers (staff set/get + manager view)
+const { setAvailability, getMyAvailability, removeAvailability, getStaffAvailability } = require('../controllers/availabilityController')
 
 // Middleware: verifies a Bearer JWT in the Authorization header (used for manager routes)
 function authMiddleWare(req, res, next){
@@ -72,8 +77,8 @@ async function staffAuthenticationWithCookies(req, res, next){
 
 //manager routes
 
-// Download attendance report as an Excel file (no auth — intentional for direct download links)
-router.get("/download-attendance", download_attendance)
+// Download attendance report as an Excel file — manager auth required
+router.get("/download-attendance", authMiddleWare, download_attendance)
 
 // Manager login — validates credentials via passport local strategy and returns a JWT
 router.post("/manager-login", (req, res, next)=>{
@@ -151,6 +156,11 @@ router.get("/org-roles", authMiddleWare, getOrgRoles)
 router.post("/org-roles", authMiddleWare, addOrgRole)
 router.post("/org-roles/remove", authMiddleWare, removeOrgRole)
 
+// CRUD for organisation site locations — used for multi-site GPS geo-fencing
+router.get("/org-locations", authMiddleWare, getOrgLocations)
+router.post("/org-locations", authMiddleWare, addOrgLocation)
+router.delete("/org-locations/:locationId", authMiddleWare, removeOrgLocation)
+
 // Retrieve shift requests that need manager action (pending + staff_agreed)
 router.get("/pending-shift-requests", authMiddleWare, getPendingShiftRequests)
 // Manager sends a time proposal back to the staff member (moves request to 'proposed')
@@ -162,6 +172,30 @@ router.post("/shift-request-resolve/:id", authMiddleWare, resolveShiftRequest)
 router.get("/my-shift-proposals", staffAuthenticationWithCookies, getMyShiftProposals)
 // Staff accepts or denies a manager's time proposal
 router.post("/shift-proposal-respond/:id", staffAuthenticationWithCookies, respondToShiftProposal)
+
+// Staff submits a new leave request
+router.post("/leave-request", staffAuthenticationWithCookies, submitLeaveRequest)
+// Staff views their own leave request history
+router.get("/my-leave-requests", staffAuthenticationWithCookies, getMyLeaveRequests)
+// Manager retrieves all pending leave requests
+router.get("/pending-leave-requests", authMiddleWare, getPendingLeaveRequests)
+// Manager approves a leave request
+router.post("/leave-request-approve/:id", authMiddleWare, approveLeaveRequest)
+// Manager denies a leave request (body: { managerNotes? })
+router.post("/leave-request-deny/:id", authMiddleWare, denyLeaveRequest)
+// Manager retrieves all leave requests with optional filters (?from=&to=&status=&staffId=)
+router.get("/all-leave-requests", authMiddleWare, getAllLeaveRequests)
+// Manager revokes a previously approved leave (body: { managerNotes? })
+router.post("/leave-request-revoke/:id", authMiddleWare, revokeLeaveRequest)
+
+// Staff sets or updates a single availability entry (upsert)
+router.post("/my-availability", staffAuthenticationWithCookies, setAvailability)
+// Staff retrieves all their availability entries
+router.get("/my-availability", staffAuthenticationWithCookies, getMyAvailability)
+// Staff removes a specific availability entry
+router.post("/my-availability/remove", staffAuthenticationWithCookies, removeAvailability)
+// Manager views a specific staff member's availability schedule
+router.get("/staff-availability/:id", authMiddleWare, getStaffAvailability)
 
 // Returns the currently authenticated manager's full document
 router.get("/manager-auth", authMiddleWare, async (req, res)=>{
@@ -177,11 +211,12 @@ router.get("/staff-auth", staffAuthenticationWithCookies, async (req, res)=>{
     return res.status(200).json({message : "Good to go", user : userDetails})
 })
 
-// Returns a single staff member's public profile by MongoDB id
+// Returns a single staff member's public profile by MongoDB id (OAuth tokens excluded)
 router.get("/see-staff/:id", staffAuthenticationWithCookies, async (req, res)=>{
     try{
-        console.log(req.params.id)
         const staffMember = await STAFF.findById(req.params.id)
+            .select('-googleAccessToken -googleRefreshToken -faceDescriptor')
+            .lean()
         if(staffMember){
             return res.status(200).json({staff : staffMember})
         }else{
@@ -203,6 +238,9 @@ router.post("/initiate-swap", staffAuthenticationWithCookies, initiateSwap)
 
 // Staff B confirms they accept the swap, forwarding it to manager for approval
 router.get("/staffB-accepts/:id", staffAuthenticationWithCookies, staffBAccepts)
+
+// Staff B declines the swap request — deletes the record and notifies Staff A
+router.get("/staffB-declines/:id", staffAuthenticationWithCookies, staffBDeclines)
 
 // Redirects a new staff member to Google OAuth after validating their invite token
 router.get("/create-staff-acc/:id", creatingStaffAccount)
@@ -316,14 +354,39 @@ router.get("/view-all-clockins/:id", staffAuthenticationWithCookies, async (req,
     }
 })
 
-// Org config — returns HQ coordinates, org name, and roster type (used by ClockIn/ClockOut and roster UI)
+// Org config — returns HQ coordinates, locations array, org name, and roster type
 router.get("/org-config", staffAuthenticationWithCookies, async (req, res) => {
     try {
-        const manager = await MANAGER.findOne({ 'hq_coordinates.lat': { $ne: null } }, 'org_name hq_coordinates rosterType')
+        const manager = await MANAGER.findOne(
+            { $or: [{ 'hq_coordinates.lat': { $ne: null } }, { 'locations.0': { $exists: true } }] },
+            'org_name hq_coordinates locations rosterType'
+        )
         if (!manager) return res.status(404).json({ message: "No organisation config found. Ask your manager to set HQ coordinates." })
-        return res.status(200).json({ org_name: manager.org_name, hq_coordinates: manager.hq_coordinates, rosterType: manager.rosterType || 'weekly' })
+        return res.status(200).json({
+            org_name: manager.org_name,
+            hq_coordinates: manager.hq_coordinates,
+            locations: manager.locations || [],
+            rosterType: manager.rosterType || 'weekly'
+        })
     } catch (err) {
         return res.status(500).json({ message: "Server error" })
+    }
+})
+
+// Full roster for the authenticated staff member filtered by optional date range
+router.get("/my-roster", staffAuthenticationWithCookies, async (req, res) => {
+    try {
+        const { from, to } = req.query
+        const filter = { belongs_to: req.user.id, status: { $in: ['filled', 'open_cover'] } }
+        if (from || to) {
+            filter.date = {}
+            if (from) filter.date.$gte = from
+            if (to) filter.date.$lte = to
+        }
+        const shifts = await SHIFT.find(filter).sort({ date: 1 }).lean()
+        return res.status(200).json({ roster: shifts })
+    } catch (err) {
+        return res.status(500).json({ message: 'Server error' })
     }
 })
 
@@ -336,6 +399,83 @@ router.get("/my-shift-today", staffAuthenticationWithCookies, async (req, res) =
     } catch (err) {
         return res.status(500).json({ message: "Server error" })
     }
+})
+
+// Returns the current staff member's clock-in record for today, or null if not yet clocked in
+router.get("/my-clockin-today", staffAuthenticationWithCookies, async (req, res) => {
+    try {
+        const todayStr = new Date().toDateString()
+        const clockInRecord = await CLCOKIN.findOne({ staffMember: req.user.id, dateClockedIn: todayStr }).lean()
+        return res.status(200).json({ clockIn: clockInRecord || null })
+    } catch {
+        return res.status(500).json({ message: "Server error" })
+    }
+})
+
+// Manager resets a staff member's clock-in for today so they can clock in again
+router.post("/reset-clockin/:clockInId", authMiddleWare, async (req, res) => {
+    try {
+        const record = await CLCOKIN.findById(req.params.clockInId)
+        if (!record) return res.status(404).json({ message: "Clock-in record not found" })
+
+        const staffId = record.staffMember
+
+        // Delete the paired clock-out record created at clock-in time
+        const clockOutRecord = await CLOCKOUT.findOne({ clockInRecord: record._id })
+        if (clockOutRecord) {
+            await STAFF.findByIdAndUpdate(staffId, { $pull: { clockOutDetails: clockOutRecord._id } })
+            await CLOCKOUT.findByIdAndDelete(clockOutRecord._id)
+        }
+
+        // Remove the clock-in from the staff member's history and delete it
+        await STAFF.findByIdAndUpdate(staffId, { $pull: { clock_In_Details: record._id } })
+        await CLCOKIN.findByIdAndDelete(record._id)
+
+        // Notify the staff member in real time so their dashboard updates immediately
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${staffId}`).emit('clockin_reset', {
+                message: "Your manager has reset your clock-in. Please clock in again when ready."
+            })
+        } catch { /* socket unavailable — staff will see the change on next load */ }
+
+        return res.status(200).json({ message: "Clock-in reset successfully" })
+    } catch {
+        return res.status(500).json({ message: "Server error" })
+    }
+})
+
+// Push notification routes
+
+// Returns the VAPID public key so browsers can create a push subscription
+router.get("/push-vapid-key", (req, res) => {
+    res.json({ publicKey: process.env.VAPID_PUBLIC_KEY })
+})
+
+// Staff saves their browser push subscription on their Staff document
+router.post("/push-subscribe", staffAuthenticationWithCookies, async (req, res) => {
+    const { subscription } = req.body
+    if (!subscription || !subscription.endpoint) {
+        return res.status(400).json({ message: 'Invalid subscription object' })
+    }
+    await STAFF.findByIdAndUpdate(req.user.id, { pushSubscription: subscription })
+    return res.status(200).json({ message: 'Push subscription saved' })
+})
+
+// Manager saves their browser push subscription on their Manager document
+router.post("/push-subscribe-manager", authMiddleWare, async (req, res) => {
+    const { subscription } = req.body
+    if (!subscription || !subscription.endpoint) {
+        return res.status(400).json({ message: 'Invalid subscription object' })
+    }
+    // Store per-device; avoid duplicates by endpoint URL
+    await MANAGER.findByIdAndUpdate(req.user.id, {
+        $pull: { pushSubscriptions: { endpoint: subscription.endpoint } }
+    })
+    await MANAGER.findByIdAndUpdate(req.user.id, {
+        $push: { pushSubscriptions: subscription }
+    })
+    return res.status(200).json({ message: 'Push subscription saved' })
 })
 
 // AI routes
@@ -357,5 +497,132 @@ router.post("/find-cover/:shiftId", authMiddleWare, async (req, res) => {
         return res.status(500).json({ message : "Smart Match failed", error : err.message })
     }
 })
+
+// Cover approval flow ─────────────────────────────────────────────────────────
+
+// Returns all shifts awaiting manager approval before going live in the Marketplace
+router.get("/pending-cover-shifts", authMiddleWare, async (req, res) => {
+    try {
+        const shifts = await SHIFT.find({ status: 'pending_cover' })
+            .populate('belongs_to', 'staffName role department email')
+            .sort({ date: 1 })
+            .lean()
+        return res.status(200).json({ shifts })
+    } catch(err) {
+        return res.status(500).json({ message: 'Failed to fetch pending cover shifts', error: err.message })
+    }
+})
+
+// Manager approves a pending cover request — shift becomes open_cover and Smart Match fires
+router.post("/approve-cover/:id", authMiddleWare, async (req, res) => {
+    try {
+        const shift = await SHIFT.findById(req.params.id)
+        if (!shift || shift.status !== 'pending_cover') {
+            return res.status(404).json({ message: 'Shift not found or not awaiting approval.' })
+        }
+        shift.status = 'open_cover'
+        await shift.save()
+
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${shift.belongs_to}`).emit('cover_approved', {
+                shiftId: shift._id,
+                date: shift.date,
+                message: `Your cover request for ${shift.date} was approved — it's now live in the Marketplace.`
+            })
+        } catch { /* non-fatal */ }
+
+        // Trigger Smart Match to email top candidates asynchronously
+        findCoverCandidates(shift).catch(err =>
+            console.error('Smart Match failed after approve-cover:', err.message)
+        )
+
+        return res.status(200).json({ message: 'Cover request approved — shift is now live in the Marketplace.' })
+    } catch(err) {
+        return res.status(500).json({ message: 'Approval failed', error: err.message })
+    }
+})
+
+// Manager rejects a pending cover request — shift is returned to the original staff member
+router.post("/reject-cover/:id", authMiddleWare, async (req, res) => {
+    try {
+        const shift = await SHIFT.findById(req.params.id)
+        if (!shift || shift.status !== 'pending_cover') {
+            return res.status(404).json({ message: 'Shift not found or not awaiting approval.' })
+        }
+        shift.status = 'filled'
+        await shift.save()
+
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${shift.belongs_to}`).emit('cover_rejected', {
+                shiftId: shift._id,
+                date: shift.date,
+                message: `Your cover request for ${shift.date} was not approved by your manager. You are still assigned to this shift.`
+            })
+        } catch { /* non-fatal */ }
+
+        return res.status(200).json({ message: 'Cover request rejected — shift returned to original staff member.' })
+    } catch(err) {
+        return res.status(500).json({ message: 'Rejection failed', error: err.message })
+    }
+})
+
+// Returns all shifts currently live in the Marketplace (open_cover) for manager visibility
+router.get("/active-open-shifts", authMiddleWare, async (req, res) => {
+    try {
+        const shifts = await SHIFT.find({ status: 'open_cover' })
+            .populate('belongs_to', 'staffName role department')
+            .sort({ date: 1 })
+            .lean()
+        return res.status(200).json({ shifts })
+    } catch(err) {
+        return res.status(500).json({ message: 'Failed to fetch active open shifts', error: err.message })
+    }
+})
+
+// Manager pulls a live open-cover shift back — removed from Marketplace, returned to original owner
+router.post("/cancel-open-shift/:id", authMiddleWare, async (req, res) => {
+    try {
+        const shift = await SHIFT.findById(req.params.id)
+        if (!shift || shift.status !== 'open_cover') {
+            return res.status(404).json({ message: 'Shift not found or not currently open.' })
+        }
+        shift.status = 'filled'
+        await shift.save()
+
+        try {
+            const io = require('../utils/socket').getIO()
+            // Remove the card from every open Marketplace view
+            io.emit('marketplace_shift_taken', { shiftId: String(shift._id) })
+            // Tell the original owner they are back on this shift
+            io.to(`staff_${shift.belongs_to}`).emit('cover_rejected', {
+                shiftId: shift._id,
+                date: shift.date,
+                message: `The open shift on ${shift.date} has been pulled from the Marketplace by your manager. You are reassigned to this shift.`
+            })
+        } catch { /* non-fatal */ }
+
+        return res.status(200).json({ message: 'Open shift cancelled — returned to original staff member.' })
+    } catch(err) {
+        return res.status(500).json({ message: 'Cancellation failed', error: err.message })
+    }
+})
+
+// Marketplace — returns all open-cover shifts available for claiming
+router.get("/open-shifts", staffAuthenticationWithCookies, async (req, res) => {
+    try {
+        const shifts = await SHIFT.find({ status: 'open_cover' })
+            .populate('belongs_to', 'staffName role department')
+            .sort({ date: 1 })
+            .lean()
+        return res.status(200).json({ shifts })
+    } catch(err) {
+        return res.status(500).json({ message: 'Failed to fetch open shifts', error: err.message })
+    }
+})
+
+// Staff claims an open-cover shift from the Marketplace
+router.post("/claim-shift/:id", staffAuthenticationWithCookies, claimOpenShift)
 
 module.exports = router;

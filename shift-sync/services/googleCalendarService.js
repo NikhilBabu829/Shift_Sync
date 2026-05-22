@@ -127,4 +127,49 @@ async function deleteShiftEvent(staff, eventId) {
     }
 }
 
-module.exports = { createShiftEvent, deleteShiftEvent }
+/**
+ * Creates an all-day Google Calendar event spanning the approved leave period.
+ *
+ * Google treats all-day events as exclusive on the end date, so endDate must be
+ * incremented by one day (e.g. leave ending 2026-06-05 needs an end of 2026-06-06).
+ *
+ * @param {Object} staff     - Mongoose Staff document with googleAccessToken / googleRefreshToken
+ * @param {Object} leave     - LeaveRequest document with leaveType, startDate, endDate
+ * @returns {string|null}    - Google Calendar event id on success, null on failure or missing tokens
+ */
+async function createLeaveEvent(staff, leave) {
+    if (!staff.googleAccessToken) {
+        console.warn(`[Calendar] Skipping leave event — no access token for staff ${staff._id}`)
+        return null
+    }
+
+    const auth     = buildOAuth2Client(staff)
+    const calendar = google.calendar({ version: 'v3', auth })
+
+    const typeLabel = { sick: 'Sick Leave', annual: 'Annual Leave', personal: 'Personal Leave' }[leave.leaveType] || 'Leave'
+
+    // Google all-day end date is exclusive — add one day so the last day is included
+    const endExclusive = new Date(leave.endDate)
+    endExclusive.setDate(endExclusive.getDate() + 1)
+    const endDateStr = endExclusive.toISOString().slice(0, 10)
+
+    const event = {
+        summary: `${typeLabel} — Shift Sync`,
+        description: leave.notes ? `Leave notes: ${leave.notes}` : `Approved ${typeLabel.toLowerCase()} via Shift Sync.`,
+        start: { date: leave.startDate },
+        end:   { date: endDateStr },
+        reminders: { useDefault: false },
+    }
+
+    try {
+        const response = await calendar.events.insert({ calendarId: 'primary', requestBody: event })
+        console.log(`[Calendar] Leave event created for staff ${staff._id}, eventId: ${response.data.id}`)
+        return response.data.id
+    } catch (err) {
+        const detail = err.response?.data?.error || err.message
+        console.error(`[Calendar] createLeaveEvent failed for staff ${staff._id}:`, detail)
+        return null
+    }
+}
+
+module.exports = { createShiftEvent, deleteShiftEvent, createLeaveEvent }

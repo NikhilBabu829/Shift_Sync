@@ -114,7 +114,7 @@ function recoverStaffContext(parsedIntent, recentHistory, rawMessage) {
 
     const lastContent = lastModelMsg.content
 
-    // Case 1: router sent "What time would you like to start" — user replied with times only.
+    // Case 1: router sent "What time would you like to start" — user replied with times or a time-of-day preference.
     // The LLM may have returned unknown (no context) or request_shift with no date (lost context).
     const askedForTime = lastContent.includes('What time would you like to start')
     if (askedForTime && (parsedIntent.intent === 'unknown' || (parsedIntent.intent === 'request_shift' && !parsedIntent.date))) {
@@ -122,6 +122,12 @@ function recoverStaffContext(parsedIntent, recentHistory, rawMessage) {
         const times     = parseTimeFromText(rawMessage)
         if (dateMatch && (times.shift_time || times.end_time)) {
             return { ...parsedIntent, intent: 'request_shift', date: dateMatch[1], shift_time: times.shift_time, end_time: times.end_time }
+        }
+        // User replied with a time-of-day preference (e.g. "morning") rather than a specific clock time
+        const TOD_RE = /\b(morning|afternoon|evening|night)\b/i
+        const todMatch = rawMessage.match(TOD_RE)
+        if (dateMatch && todMatch) {
+            return { ...parsedIntent, intent: 'request_shift', date: dateMatch[1], shift_time: null, end_time: null, notes: `prefers ${todMatch[1].toLowerCase()} shift` }
         }
     }
 

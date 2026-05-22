@@ -7,6 +7,7 @@ const CLOCKOUT = require("../models/clockOut")
 const CLOCKIN = require("../models/clockIn")
 const TOKEN = require('../models/tokenSign')
 const SHIFT_REQUEST = require('../models/shiftRequest')
+const LEAVE_REQUEST = require('../models/leaveRequest')
 const bcrypt = require('bcryptjs')
 const passport = require('passport')
 // Wraps async route handlers and forwards thrown errors to Express error handler
@@ -28,6 +29,8 @@ const { sendPush, sendPushToMany } = require('../utils/webPush')
 
 // HTML template builders for outgoing emails
 const { sendingToken, managerConfirmationMail } = require('../utils/mailHtmls')
+// Availability gate — shared with Smart Match
+const { isAvailableForShift } = require('../services/availabilityService')
 
 // Creates a new manager account and organisation; hashes the password before storing
 exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
@@ -43,6 +46,8 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
                 res.json(err)
             }
             else{
+                const parsedLat = hq_lat ? parseFloat(hq_lat) : null
+                const parsedLng = hq_lng ? parseFloat(hq_lng) : null
                 const manager = new MANAGER({
                     first_name,
                     last_name,
@@ -50,10 +55,10 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
                     password : hashedPassword,
                     manager : true,
                     org_name : org_name || '',
-                    hq_coordinates : {
-                        lat : hq_lat ? parseFloat(hq_lat) : null,
-                        lng : hq_lng ? parseFloat(hq_lng) : null
-                    },
+                    hq_coordinates : { lat : parsedLat, lng : parsedLng },
+                    locations : (parsedLat && parsedLng)
+                        ? [{ name : 'HQ', lat : parsedLat, lng : parsedLng }]
+                        : [],
                     // Default to weekly roster if an unrecognised type is submitted
                     rosterType : ['weekly', 'monthly'].includes(rosterType) ? rosterType : 'weekly',
                     roles : Array.isArray(roles) ? roles.map(r => String(r).trim()).filter(Boolean) : []
@@ -378,6 +383,23 @@ exports.addRosterShift = asyncHandler(async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return res.status(400).json({ message: 'date must be in YYYY-MM-DD format' })
     }
+    // Block scheduling on dates covered by approved leave
+    const leaveConflict = await LEAVE_REQUEST.findOne({
+        staffMember: staffId,
+        status: 'approved',
+        startDate: { $lte: date },
+        endDate:   { $gte: date }
+    }).lean()
+    if (leaveConflict) {
+        return res.status(409).json({ message: `This staff member has approved ${leaveConflict.leaveType} leave on ${date}` })
+    }
+
+    // Block scheduling when the staff member has declared unavailability on this date/time
+    const availCheck = await isAvailableForShift(staffId, date, startTime.trim(), endTime.trim())
+    if (!availCheck.available) {
+        return res.status(409).json({ message: `Cannot schedule: ${availCheck.reason}` })
+    }
+
     const newShift = new SHIFT({
         belongs_to: staffId,
         date,
@@ -397,6 +419,16 @@ exports.addRosterShift = asyncHandler(async (req, res) => {
         }
     }
 
+    // Notify the staff member that a new shift has been added to their roster
+    if (staffMember) {
+        sendPush(staffMember.pushSubscription, {
+            title: 'New Shift Added',
+            body: `A new shift has been added to your roster on ${date} (${startTime}–${endTime}).`,
+            icon: '/favicon.ico',
+            tag: `roster-add-${newShift._id}`
+        })
+    }
+
     // Populate staff name so the response mirrors what the roster GET returns
     await newShift.populate('belongs_to', 'staffName')
     return res.status(200).json({ shift: newShift, message: 'Shift added to roster' })
@@ -407,9 +439,15 @@ exports.removeRosterShift = asyncHandler(async (req, res) => {
     const { id } = req.params
     const shift = await SHIFT.findById(id)
     if (shift) {
-        if (shift.googleCalendarEventId) {
-            const staffMember = await STAFF.findById(shift.belongs_to)
-            if (staffMember) await deleteShiftEvent(staffMember, shift.googleCalendarEventId)
+        const staffMember = await STAFF.findById(shift.belongs_to)
+        if (staffMember) {
+            if (shift.googleCalendarEventId) await deleteShiftEvent(staffMember, shift.googleCalendarEventId)
+            sendPush(staffMember.pushSubscription, {
+                title: 'Shift Removed',
+                body: `Your shift on ${shift.date} (${shift.shift_start_time}–${shift.shift_end_time}) has been removed from your roster.`,
+                icon: '/favicon.ico',
+                tag: `roster-remove-${id}`
+            })
         }
         await shift.deleteOne()
     }
@@ -772,4 +810,50 @@ exports.resolveShiftRequest = asyncHandler(async (req, res) => {
     } catch { /* non-critical */ }
 
     return res.status(200).json({ message: 'Request denied' })
+})
+
+// Returns the manager's configured site locations.
+// On first call for accounts created before multi-location support, seeds the HQ coordinate
+// into the locations array so existing managers don't start with an empty list.
+exports.getOrgLocations = asyncHandler(async (req, res) => {
+    const manager = await MANAGER.findById(req.user.id).select('locations hq_coordinates')
+    if (!manager) return res.status(404).json({ message: 'Manager not found' })
+    if (manager.locations.length === 0 && manager.hq_coordinates?.lat && manager.hq_coordinates?.lng) {
+        manager.locations.push({ name: 'HQ', lat: manager.hq_coordinates.lat, lng: manager.hq_coordinates.lng })
+        await manager.save()
+    }
+    return res.status(200).json({ locations: manager.locations })
+})
+
+// Adds a new named site location; rejects duplicates by name (case-insensitive) or near-identical coordinates (~11 m)
+exports.addOrgLocation = asyncHandler(async (req, res) => {
+    const name = String(req.body.name || '').trim()
+    const lat   = parseFloat(req.body.lat)
+    const lng   = parseFloat(req.body.lng)
+    if (!name || isNaN(lat) || isNaN(lng)) {
+        return res.status(400).json({ message: 'name, lat, and lng are required.' })
+    }
+    const manager = await MANAGER.findById(req.user.id).select('locations')
+    const lowerName = name.toLowerCase()
+    const COORD_TOLERANCE = 0.0001  // ~11 m — treats effectively identical coordinates as the same site
+    const isDuplicate = manager.locations.some(loc =>
+        loc.name.toLowerCase() === lowerName ||
+        (Math.abs(loc.lat - lat) < COORD_TOLERANCE && Math.abs(loc.lng - lng) < COORD_TOLERANCE)
+    )
+    if (isDuplicate) {
+        return res.status(409).json({ message: 'A location with that name or coordinates already exists.' })
+    }
+    manager.locations.push({ name, lat, lng })
+    await manager.save()
+    return res.status(200).json({ locations: manager.locations, message: 'Location added.' })
+})
+
+// Removes a site location by its subdocument _id
+exports.removeOrgLocation = asyncHandler(async (req, res) => {
+    const manager = await MANAGER.findByIdAndUpdate(
+        req.user.id,
+        { $pull: { locations: { _id: req.params.locationId } } },
+        { new: true }
+    ).select('locations')
+    return res.status(200).json({ locations: manager?.locations || [], message: 'Location removed.' })
 })

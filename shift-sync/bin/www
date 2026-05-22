@@ -24,6 +24,14 @@ var server = http.createServer(app);
 const socketIo = require('../utils/socket');
 socketIo.init(server);
 
+// Clock-out reminder — sends a push notification to staff at their shift end time
+const clockOutReminder = require('../services/clockOutReminder');
+clockOutReminder.start();
+
+// Marketplace urgency — alerts managers when an open shift starts within 4 hours
+const marketplaceReminder = require('../services/marketplaceReminder');
+marketplaceReminder.start();
+
 /**
  * Listen on provided port, on all network interfaces.
  */

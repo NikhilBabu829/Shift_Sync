@@ -13,8 +13,17 @@ const ManagerSchema = new Schema({
         lat : { type : Number, default : null },        // headquarters latitude for GPS proximity checks
         lng : { type : Number, default : null }         // headquarters longitude for GPS proximity checks
     },
+    locations : {
+        type : [{
+            name : { type : String, default : 'Site' },
+            lat  : { type : Number, required : true },
+            lng  : { type : Number, required : true }
+        }],
+        default : []
+    },
     rosterType : { type : String, enum : ['weekly', 'monthly'], default : 'weekly' }, // controls how the roster UI groups shifts
-    roles : { type : [String], default : [] }           // organisation-defined role labels available when inviting staff
+    roles : { type : [String], default : [] },          // organisation-defined role labels available when inviting staff
+    pushSubscriptions : { type : [Schema.Types.Mixed], default : [] }  // array of Web Push subscriptions (one per browser/device)
 })
 
 module.exports = mongoose.model('Manager', ManagerSchema);

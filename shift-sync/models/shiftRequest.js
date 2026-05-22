@@ -21,4 +21,8 @@ const ShiftRequestSchema = new Schema({
     createdAt:          { type: Date, default: Date.now }   // submission timestamp for sorting in the manager view
 })
 
+// Manager fetches all pending/staff_agreed requests; staff fetches their own proposed requests
+ShiftRequestSchema.index({ status: 1, createdAt: 1 })
+ShiftRequestSchema.index({ staffMember: 1, status: 1 })
+
 module.exports = mongoose.model('ShiftRequest', ShiftRequestSchema)

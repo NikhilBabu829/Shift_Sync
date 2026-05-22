@@ -14,17 +14,13 @@ const google = require('passport-google-oauth20').Strategy
 const bcrypt = require('bcryptjs')
 const session = require('express-session')
 
-// Route handlers
-var indexRouter = require('./routes/index');
 const APIRoutes = require('./routes/API')
+const { startClockOutReminderCron } = require('./utils/clockOutReminderCron')
 
 var app = express();
 const mongoose = require('mongoose')
 
 const cors = require('cors')
-
-// Named import of the same Google strategy used for staff OAuth login
-const GoogleStrategy = require('passport-google-oauth20').Strategy
 
 // view engine setup
 app.set('views', path.join(__dirname, 'views'));
@@ -37,7 +33,7 @@ const STAFF = require('./models/staff')
 // Allow requests from the frontend origin with credentials (cookies/JWTs)
 app.use(cors({
   origin : process.env.FRONTEND_URL || "http://localhost:5173",
-  methods : ["GET", "POST"],
+  methods : ["GET", "POST", "DELETE"],
   credentials : true
 }))
 
@@ -67,6 +63,9 @@ async function mongoDbConnection(){
 
 // Connect to MongoDB on startup; log any connection errors
 mongoDbConnection().catch((err)=>{console.log(err)})
+
+// Start the 5-minute clock-out push reminder cron after DB connection is initiated
+startClockOutReminderCron()
 
 // Manager local strategy — verifies email and bcrypt-hashed password against the Manager collection
 passport.use("manager-local", new passportLocalStrategy({ usernameField : 'email', passwordField : 'password'}, async (email, pass, done)=>{

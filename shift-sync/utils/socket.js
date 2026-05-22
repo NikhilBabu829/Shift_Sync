@@ -12,6 +12,18 @@ module.exports = {
                 credentials: true
             }
         });
+
+        io.on('connection', (socket) => {
+            // Client emits join_room after auth to subscribe to targeted events
+            socket.on('join_room', ({ userId, role }) => {
+                if (role === 'staff' && userId) {
+                    socket.join(`staff_${userId}`)
+                } else if (role === 'manager') {
+                    socket.join('managers')
+                }
+            })
+        })
+
         return io;
     },
     // Returns the existing Socket.io instance; throws if init() has not been called yet

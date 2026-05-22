@@ -13,10 +13,15 @@ const ShiftSchema = new Schema({
     swap_shift_start_time : {type : String},                        // the swap partner's shift start time
     swap_shift_end_time : {type : String},                          // the swap partner's shift end time
     swap_shift_length : {type : Number},                            // the swap partner's shift duration in fractional hours
-    status : {type : String, enum : ['pending_swap', 'open_cover', 'filled', 'approved'], default : 'pending_swap'}, // lifecycle state of the shift
+    status : {type : String, enum : ['pending_swap', 'pending_cover', 'open_cover', 'filled', 'approved'], default : 'pending_swap'}, // lifecycle state of the shift
     requiredRole : {type : String, default : 'staff'},              // role required to cover this shift (used by Smart Match)
     shiftDate : {type : Date},                                      // Date object duplicate of date; used for date-comparison queries
     googleCalendarEventId : {type : String}                         // Google Calendar event id; stored so the event can be deleted when the shift is removed
 })
+
+// Primary roster query: find shifts for a specific staff member on a specific date
+ShiftSchema.index({ belongs_to: 1, date: 1, status: 1 })
+// Manager roster view queries by status across all staff
+ShiftSchema.index({ status: 1, date: 1 })
 
 module.exports = mongoose.model('Shift', ShiftSchema)

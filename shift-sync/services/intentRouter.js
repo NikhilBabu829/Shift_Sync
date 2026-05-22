@@ -8,16 +8,21 @@ const SHIFT = require('../models/shift')
 const CLOCKIN = require('../models/clockIn')
 const STAFF = require('../models/staff')
 const SHIFT_REQUEST = require('../models/shiftRequest')
+const LEAVE_REQUEST = require('../models/leaveRequest')
+const STAFF_AVAILABILITY = require('../models/staffAvailability')
 const TOKEN = require('../models/tokenSign')
+const MANAGER = require('../models/manager')
 const jwt = require('jsonwebtoken')
 // Used to validate email addresses before attempting to send invite emails
 const emailValidator = require('email-validator')
-const { inviteMember } = require('../controllers/sendMails')
+const { inviteMember, notifyManagerNewLeave } = require('../controllers/sendMails')
 // HTML builder for staff invite emails
 const { sendingToken } = require('../utils/mailHtmls')
 
 // Google Calendar sync — keeps staff calendars in step with roster changes made via AI chat
 const { createShiftEvent, deleteShiftEvent } = require('./googleCalendarService')
+// Availability gate — shared with Smart Match and roster controller
+const { getAvailabilityWindow } = require('./availabilityService')
 
 // ── Staff intent router ──────────────────────────────────────────────────────
 
@@ -52,24 +57,30 @@ async function routeIntent(parsedIntent, staffId) {
                 }
 
                 // Confirm which DB record was matched before mutating it
-                console.log(`[ROUTER:STAFF] Found shift ${shift._id} on ${shift.date} — marking as open_cover`)
-                shift.status = 'open_cover'
+                console.log(`[ROUTER:STAFF] Found shift ${shift._id} on ${shift.date} — marking as pending_cover`)
+                shift.status = 'pending_cover'
                 await shift.save()
-                console.log(`[ROUTER:STAFF] Shift saved. Triggering Smart Match async...`)
+                console.log(`[ROUTER:STAFF] Shift saved. Notifying managers for approval...`)
 
-                // Trigger Smart Match asynchronously; errors are caught and logged without blocking the response
-                const { findCoverCandidates } = require('./smartMatchService')
-                findCoverCandidates(shift).catch((err) =>
-                    console.error('Smart Match failed after drop_shift:', err.message)
-                )
+                // Notify all managers in real time so they can approve or reject
+                try {
+                    const io = require('../utils/socket').getIO()
+                    io.to('managers').emit('cover_request_pending', {
+                        shiftId: shift._id,
+                        date: shift.date,
+                        shift_start_time: shift.shift_start_time,
+                        shift_end_time: shift.shift_end_time,
+                        staffId: String(shift.belongs_to)
+                    })
+                } catch(err) { console.error('[ROUTER:STAFF] Socket emit failed:', err.message) }
 
                 return {
                     completed: true,
                     action: intent,
-                    data: { shiftId: shift._id, date: shift.date, status: 'open_cover' },
+                    data: { shiftId: shift._id, date: shift.date, status: 'pending_cover' },
                     message: intent === 'report_sick'
-                        ? `Got it — your shift on ${shift.date} has been opened for coverage. Feel better soon.`
-                        : `Your shift on ${shift.date} has been marked as needing cover. We'll notify available staff.`
+                        ? `Got it — your cover request for ${shift.date} has been sent to your manager for approval. You'll be notified once it's live.`
+                        : `Your cover request for ${shift.date} has been sent to your manager for approval. You'll be notified once it's live in the Marketplace.`
                 }
             }
 
@@ -87,20 +98,26 @@ async function routeIntent(parsedIntent, staffId) {
                     }
                 }
 
-                // Open for coverage and kick off Smart Match
-                shift.status = 'open_cover'
+                // Mark as pending manager approval before going live in the Marketplace
+                shift.status = 'pending_cover'
                 await shift.save()
 
-                const { findCoverCandidates } = require('./smartMatchService')
-                findCoverCandidates(shift).catch((err) =>
-                    console.error('Smart Match failed after request_cover:', err.message)
-                )
+                try {
+                    const io = require('../utils/socket').getIO()
+                    io.to('managers').emit('cover_request_pending', {
+                        shiftId: shift._id,
+                        date: shift.date,
+                        shift_start_time: shift.shift_start_time,
+                        shift_end_time: shift.shift_end_time,
+                        staffId: String(shift.belongs_to)
+                    })
+                } catch(err) { console.error('[ROUTER:STAFF] Socket emit failed:', err.message) }
 
                 return {
                     completed: true,
                     action: 'request_cover',
-                    data: { shiftId: shift._id, date: shift.date },
-                    message: `Your shift on ${shift.date} is now open for cover. The best available staff have been notified.`
+                    data: { shiftId: shift._id, date: shift.date, status: 'pending_cover' },
+                    message: `Your cover request for ${shift.date} has been sent to your manager for approval. You'll be notified once it's live in the Marketplace.`
                 }
             }
 
@@ -166,13 +183,17 @@ async function routeIntent(parsedIntent, staffId) {
                     }
                 }
 
-                // Prompt for the time if only the date was extracted
-                if (!shift_time) {
+                // Detect time-of-day preferences in notes (e.g. "prefers morning shift")
+                const TIME_OF_DAY_RE = /\b(morning|afternoon|evening|night)\b/i
+                const hasTimePreference = notes && TIME_OF_DAY_RE.test(notes)
+
+                // Prompt for the time only when no specific time AND no time-of-day preference was given
+                if (!shift_time && !hasTimePreference) {
                     return {
                         completed: false,
                         action: 'request_shift',
                         data: { date },
-                        message: `Got it — you'd like to work on ${date}. What time would you like to start, and when would you finish? (e.g. "9am to 5pm" or "8:30 till 16:00")`
+                        message: `Got it — you'd like to work on ${date}. What time would you like to start, and when would you finish? (e.g. "9am to 5pm", "8:30 till 16:00", or "morning" / "afternoon")`
                     }
                 }
 
@@ -188,25 +209,168 @@ async function routeIntent(parsedIntent, staffId) {
                 }
 
                 // Confirm the values being persisted before the DB write
-                console.log(`[ROUTER:STAFF] Creating shift request for staffId=${staffId} on ${date} (${shift_time}–${end_time || '?'})`)
+                console.log(`[ROUTER:STAFF] Creating shift request for staffId=${staffId} on ${date} (${shift_time || 'time TBD'}–${end_time || '?'}) notes="${notes || 'none'}"`)
                 // Persist the request for manager review
                 const shiftRequest = new SHIFT_REQUEST({
                     staffMember: staffId,
                     requestedDate: date,
-                    requestedStartTime: shift_time,
+                    requestedStartTime: shift_time || null,
                     requestedEndTime: end_time || null,
                     notes: notes || null,
                     status: 'pending'
                 })
                 await shiftRequest.save()
 
-                // Include the time in the confirmation message for clarity
-                const timeNote = ` (${shift_time}${end_time ? ' – ' + end_time : ''})`
+                // Build a time description: use clock times if present, otherwise surface the preference note
+                let timeNote = ''
+                if (shift_time) {
+                    timeNote = ` (${shift_time}${end_time ? ' – ' + end_time : ''})`
+                } else if (notes) {
+                    timeNote = ` — ${notes}`
+                }
+                const managerNote = !shift_time ? ' Your manager will propose a specific time for you to review.' : ''
                 return {
                     completed: true,
                     action: 'request_shift',
                     data: { requestId: shiftRequest._id, date, status: 'pending' },
-                    message: `Your request to work on ${date}${timeNote} has been submitted. Your manager will review it.`
+                    message: `Your request to work on ${date}${timeNote} has been submitted.${managerNote}`
+                }
+            }
+
+            case 'request_leave': {
+                const { leaveType, startDate, endDate, notes } = parsedIntent
+
+                if (!startDate || !endDate) {
+                    return {
+                        completed: false,
+                        action: 'request_leave',
+                        data: null,
+                        message: "I'd like to submit that leave request for you — which dates do you need off? (e.g. \"June 10 to June 14\" or \"just Monday the 20th\")"
+                    }
+                }
+
+                const validTypes = ['sick', 'annual', 'personal']
+                const resolvedType = validTypes.includes(leaveType) ? leaveType : 'personal'
+
+                // Prevent duplicate pending leave for overlapping dates
+                const existing = await LEAVE_REQUEST.findOne({
+                    staffMember: staffId,
+                    status: 'pending',
+                    startDate: { $lte: endDate },
+                    endDate:   { $gte: startDate }
+                }).lean()
+                if (existing) {
+                    return {
+                        completed: true,
+                        action: 'request_leave',
+                        data: { leaveId: existing._id },
+                        message: `You already have a pending leave request covering ${existing.startDate} to ${existing.endDate}. Your manager will review it shortly.`
+                    }
+                }
+
+                const leave = new LEAVE_REQUEST({
+                    staffMember: staffId,
+                    leaveType: resolvedType,
+                    startDate,
+                    endDate,
+                    notes: notes || null,
+                    status: 'pending'
+                })
+                await leave.save()
+
+                // Notify manager by email and socket (non-blocking)
+                try {
+                    const [staffDoc, manager] = await Promise.all([
+                        STAFF.findById(staffId).select('staffName email').lean(),
+                        MANAGER.findOne({}).select('email firstName').lean()
+                    ])
+                    if (staffDoc && manager) {
+                        notifyManagerNewLeave({
+                            to: manager.email,
+                            managerName: manager.firstName || 'Manager',
+                            staffName: staffDoc.staffName,
+                            leaveType: resolvedType,
+                            startDate,
+                            endDate,
+                            notes: notes || null,
+                        })
+                    }
+                    const io = require('../utils/socket').getIO()
+                    io.to('managers').emit('leave_request_submitted', {
+                        leaveId: leave._id,
+                        staffName: staffDoc?.staffName || 'A staff member',
+                        leaveType: resolvedType,
+                        startDate,
+                        endDate,
+                        notes: notes || null,
+                    })
+                } catch { /* non-critical */ }
+
+                const typeLabel = { sick: 'sick leave', annual: 'annual leave', personal: 'personal leave' }[resolvedType]
+                const dateRange = startDate === endDate ? startDate : `${startDate} to ${endDate}`
+                return {
+                    completed: true,
+                    action: 'request_leave',
+                    data: { leaveId: leave._id, leaveType: resolvedType, startDate, endDate },
+                    message: `Done — I've submitted your ${typeLabel} request for ${dateRange}. Your manager will review it and you'll be notified of the decision.`
+                }
+            }
+
+            case 'set_availability': {
+                const { entries } = parsedIntent
+
+                if (!Array.isArray(entries) || entries.length === 0) {
+                    return {
+                        completed: false,
+                        action: 'set_availability',
+                        data: null,
+                        message: "I can update your availability — just tell me which days or dates and whether you're available (and optionally the hours). For example: \"I'm not available on weekends\" or \"I can work Monday to Friday 9am to 5pm\"."
+                    }
+                }
+
+                const saved = []
+                const failed = []
+
+                for (const entry of entries) {
+                    const { type, dayOfWeek, date, available, startTime, endTime } = entry
+                    if (!['weekly', 'date'].includes(type)) { failed.push(`unknown type "${type}"`); continue }
+                    if (type === 'weekly' && (dayOfWeek == null || dayOfWeek < 0 || dayOfWeek > 6)) { failed.push('invalid dayOfWeek'); continue }
+                    if (type === 'date' && (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date))) { failed.push(`invalid date "${date}"`); continue }
+
+                    const filter = type === 'weekly'
+                        ? { staffMember: staffId, type: 'weekly', dayOfWeek: Number(dayOfWeek) }
+                        : { staffMember: staffId, type: 'date', date }
+
+                    const update = {
+                        available: Boolean(available),
+                        startTime: available && startTime ? startTime : null,
+                        endTime:   available && endTime   ? endTime   : null,
+                        updatedAt: new Date()
+                    }
+
+                    try {
+                        await STAFF_AVAILABILITY.findOneAndUpdate(filter, { $set: update }, { upsert: true })
+                        if (type === 'weekly') {
+                            const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+                            const label = available
+                                ? (startTime && endTime ? `${dayNames[dayOfWeek]} ${startTime}–${endTime}` : `${dayNames[dayOfWeek]} (all day)`)
+                                : `${dayNames[dayOfWeek]} (unavailable)`
+                            saved.push(label)
+                        } else {
+                            saved.push(available ? `${date} (available${startTime && endTime ? ` ${startTime}–${endTime}` : ''})` : `${date} (unavailable)`)
+                        }
+                    } catch { failed.push(type === 'weekly' ? `day ${dayOfWeek}` : date) }
+                }
+
+                let message = ''
+                if (saved.length > 0) message += `Your availability has been updated: ${saved.join(', ')}.`
+                if (failed.length > 0) message += ` Could not update: ${failed.join(', ')}.`
+
+                return {
+                    completed: saved.length > 0,
+                    action: 'set_availability',
+                    data: { saved: saved.length, failed: failed.length },
+                    message: message || 'No availability changes were made.'
                 }
             }
 
@@ -215,7 +379,7 @@ async function routeIntent(parsedIntent, staffId) {
                     completed: false,
                     action: 'clarification_needed',
                     data: null,
-                    message: "I couldn't quite understand that. Could you rephrase? For example: \"I'm sick tomorrow\" or \"I want to work this Friday\"."
+                    message: "I couldn't quite understand that. Could you rephrase? For example: \"I'm sick tomorrow\", \"I want annual leave June 10–14\", or \"I'm not available on Sundays\"."
                 }
         }
     } catch (err) {
@@ -320,6 +484,27 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
 
                     const staff = resolveStaffName(staffName, staffList)
                     if (!staff) { console.log(`[ROUTER:MANAGER]   ✗ "${staffName}" not found in staff list`); failed.push(`${staffName || 'unknown'} — staff member not found`); continue }
+
+                    // Block if the staff member has approved leave on this date
+                    const leaveConflict = await LEAVE_REQUEST.findOne({
+                        staffMember: staff._id,
+                        status: 'approved',
+                        startDate: { $lte: date },
+                        endDate:   { $gte: date }
+                    }).lean()
+                    if (leaveConflict) {
+                        failed.push(`${staff.staffName} on ${date} — has approved ${leaveConflict.leaveType} leave`)
+                        continue
+                    }
+
+                    // Block if the staff member has declared unavailability on this date/time
+                    const { isAvailableForShift } = require('./availabilityService')
+                    const availCheck = await isAvailableForShift(staff._id, date, startTime, endTime)
+                    if (!availCheck.available) {
+                        failed.push(`${staff.staffName} on ${date} — ${availCheck.reason}`)
+                        continue
+                    }
+
                     console.log(`[ROUTER:MANAGER]   + Creating shift for ${staff.staffName} on ${date} (${startTime}–${endTime})`)
 
                     // Compute shift length in hours from the HH:MM strings
@@ -485,7 +670,7 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                     }
                 }
 
-                // Five shift templates that spread coverage across the full day
+                // Fallback shift templates used when a staff member has no declared hours
                 const TEMPLATES = [
                     { start: '07:00', end: '15:30', length: 8.5 },
                     { start: '08:00', end: '16:30', length: 8.5 },
@@ -494,22 +679,21 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                     { start: '16:00', end: '00:30', length: 8.5 },
                 ]
 
-                // Each staff member is assigned 5 shifts; the starting day is offset by their
-                // position in the list so different staff cover different day combinations.
                 const SHIFTS_PER_STAFF = 5
                 const created = []
                 const skipped = []
+                const blocked = []
 
-                // Log the week range and scale so it's easy to spot if the wrong week was resolved
-                console.log(`[ROUTER:MANAGER] generate_roster — week: ${weekDates[0]} to ${weekDates[6]} | staff: ${staffList.length} | shifts per person: ${SHIFTS_PER_STAFF}`)
+                console.log(`[ROUTER:MANAGER] generate_roster — week: ${weekDates[0]} to ${weekDates[6]} | staff: ${staffList.length}`)
 
                 for (let i = 0; i < staffList.length; i++) {
                     const staff = staffList[i]
-                    const template = TEMPLATES[i % TEMPLATES.length]
+                    let shiftsCreated = 0
 
-                    for (let j = 0; j < SHIFTS_PER_STAFF; j++) {
+                    for (let j = 0; j < 7 && shiftsCreated < SHIFTS_PER_STAFF; j++) {
                         const date = weekDates[(i + j) % 7]
 
+                        // Skip if shift already exists
                         const exists = await SHIFT.findOne({
                             belongs_to: staff._id,
                             date,
@@ -521,37 +705,71 @@ async function routeManagerIntent(parsedIntent, managerId, managerToken) {
                             continue
                         }
 
-                        console.log(`[ROUTER:MANAGER]   + ${staff.staffName} on ${date} (${template.start}–${template.end})`)
+                        // Skip if the staff member has approved leave on this date
+                        const leaveConflict = await LEAVE_REQUEST.findOne({
+                            staffMember: staff._id,
+                            status: 'approved',
+                            startDate: { $lte: date },
+                            endDate:   { $gte: date }
+                        }).lean()
+                        if (leaveConflict) {
+                            console.log(`[ROUTER:MANAGER]   ✗ ${staff.staffName} on ${date} — approved ${leaveConflict.leaveType} leave`)
+                            blocked.push(`${staff.staffName} on ${date} (on leave)`)
+                            continue
+                        }
+
+                        // Resolve the staff member's availability window for this date
+                        const avail = await getAvailabilityWindow(staff._id, date)
+                        if (!avail.available) {
+                            console.log(`[ROUTER:MANAGER]   ✗ ${staff.staffName} on ${date} — ${avail.reason || 'unavailable'}`)
+                            blocked.push(`${staff.staffName} on ${date} (unavailable)`)
+                            continue
+                        }
+
+                        // Use declared hours if provided; otherwise fall back to a template
+                        let startTime, endTime, shiftLength
+                        if (avail.startTime && avail.endTime) {
+                            startTime = avail.startTime
+                            endTime   = avail.endTime
+                            const [sh, sm] = startTime.split(':').map(Number)
+                            const [eh, em] = endTime.split(':').map(Number)
+                            shiftLength = parseFloat(((eh * 60 + em - sh * 60 - sm) / 60).toFixed(2))
+                        } else {
+                            const tmpl = TEMPLATES[i % TEMPLATES.length]
+                            startTime   = tmpl.start
+                            endTime     = tmpl.end
+                            shiftLength = tmpl.length
+                        }
+
+                        console.log(`[ROUTER:MANAGER]   + ${staff.staffName} on ${date} (${startTime}–${endTime})`)
                         const newShift = await SHIFT.create({
-                            belongs_to: staff._id,
+                            belongs_to:      staff._id,
                             date,
-                            shift_start_time: template.start,
-                            shift_end_time:   template.end,
-                            shift_length:     template.length,
+                            shift_start_time: startTime,
+                            shift_end_time:   endTime,
+                            shift_length:     shiftLength,
                             status: 'filled'
                         })
 
-                        // Mirror each generated shift in the staff member's Google Calendar
                         const calEventId = await createShiftEvent(staff, newShift)
                         if (calEventId) await newShift.updateOne({ googleCalendarEventId: calEventId })
 
                         created.push(`${staff.staffName} on ${date}`)
+                        shiftsCreated++
                     }
                 }
 
-                const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
                 const weekEndDate = weekDates[6]
-                // Final tally — makes it obvious whether any slots were already occupied
-                console.log(`[ROUTER:MANAGER] generate_roster done — created: ${created.length}, skipped: ${skipped.length}`)
+                console.log(`[ROUTER:MANAGER] generate_roster done — created: ${created.length}, skipped: ${skipped.length}, blocked by availability/leave: ${blocked.length}`)
+
                 let message = `Roster generated for ${weekStart} – ${weekEndDate}: ${created.length} shift${created.length !== 1 ? 's' : ''} created across ${staffList.length} staff members.`
-                if (skipped.length > 0) {
-                    message += ` Skipped ${skipped.length} slot${skipped.length !== 1 ? 's' : ''} that already had a shift.`
-                }
+                if (skipped.length > 0) message += ` Skipped ${skipped.length} already-filled slot${skipped.length !== 1 ? 's' : ''}.`
+                if (blocked.length > 0) message += ` Skipped ${blocked.length} slot${blocked.length !== 1 ? 's' : ''} due to declared unavailability or approved leave.`
 
                 return {
                     completed: true,
                     action: 'generate_roster',
-                    data: { weekStart, weekEnd: weekEndDate, created: created.length, skipped: skipped.length },
+                    data: { weekStart, weekEnd: weekEndDate, created: created.length, skipped: skipped.length, blocked: blocked.length },
                     message
                 }
             }

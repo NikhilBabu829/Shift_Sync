@@ -12,10 +12,14 @@ const STAFF = require('../models/staff')
 const CLOCKIN = require('../models/clockIn')
 // ML client for soft-score ranking of eligible candidates
 const { rankStaffForCoverage } = require('./mlService')
+// Email notifications sent to the top-ranked candidates
+const { notifyCoverCandidates } = require('../controllers/sendMails')
+// Availability gate — checks declared weekly pattern and date overrides
+const { isAvailableForShift } = require('./availabilityService')
 
-// Weekly hours cap used to filter out staff who are already at their limit
 const MAX_WEEKLY_HOURS = 40
-// Maximum number of candidates to notify and return
+const MIN_REST_HOURS = 11
+const MAX_CONSECUTIVE_DAYS = 7
 const TOP_N = 3
 
 /**
@@ -63,6 +67,87 @@ function getWeekBounds(dateStr) {
 }
 
 /**
+ * Returns the YYYY-MM-DD string for a date offset by `days` from `dateStr`.
+ */
+function offsetDate(dateStr, days) {
+    const d = new Date(dateStr)
+    d.setUTCDate(d.getUTCDate() + days)
+    return d.toISOString().split('T')[0]
+}
+
+/**
+ * Combines a YYYY-MM-DD date and HH:MM time into a Date object (UTC).
+ */
+function toDateTime(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return null
+    return new Date(`${dateStr}T${timeStr}:00Z`)
+}
+
+/**
+ * Returns true if the staff member's existing shifts would leave less than
+ * MIN_REST_HOURS before or after the proposed open shift.
+ */
+async function violatesRestPeriod(staffId, shiftDate, shiftStartTime, shiftEndTime) {
+    const openStart = toDateTime(shiftDate, shiftStartTime)
+    const openEnd   = toDateTime(shiftDate, shiftEndTime)
+    if (!openStart || !openEnd) return false
+
+    const nearbyDates = [offsetDate(shiftDate, -1), shiftDate, offsetDate(shiftDate, 1)]
+    const records = await CLOCKIN.find({
+        staffMember  : staffId,
+        dateClockedIn: { $in: nearbyDates }
+    }).lean()
+
+    for (const record of records) {
+        const recDate  = String(record.dateClockedIn).split('T')[0]
+        const recStart = toDateTime(recDate, record.startOfShift)
+        const recEnd   = toDateTime(recDate, record.endOfShift)
+        if (!recStart || !recEnd) continue
+
+        // Gap between existing shift end and open shift start
+        const gapBefore = (openStart - recEnd) / 36e5
+        if (gapBefore >= 0 && gapBefore < MIN_REST_HOURS) return true
+
+        // Gap between open shift end and existing shift start
+        const gapAfter = (recStart - openEnd) / 36e5
+        if (gapAfter >= 0 && gapAfter < MIN_REST_HOURS) return true
+    }
+
+    return false
+}
+
+/**
+ * Returns true if adding the proposed shift would create a run of
+ * MAX_CONSECUTIVE_DAYS or more consecutive working days.
+ */
+async function wouldExceedConsecutiveDays(staffId, shiftDate) {
+    const windowStart = offsetDate(shiftDate, -6)
+    const windowEnd   = offsetDate(shiftDate, 6)
+
+    const records = await CLOCKIN.find({
+        staffMember  : staffId,
+        dateClockedIn: { $gte: windowStart, $lte: windowEnd }
+    }).lean()
+
+    const workedDates = new Set(records.map((r) => String(r.dateClockedIn).split('T')[0]))
+    workedDates.add(shiftDate)
+
+    let streak = 0
+    let maxStreak = 0
+    const cursor = new Date(windowStart + 'T00:00:00Z')
+    const endMs  = new Date(windowEnd + 'T00:00:00Z').getTime()
+
+    while (cursor.getTime() <= endMs) {
+        const dateStr = cursor.toISOString().split('T')[0]
+        streak = workedDates.has(dateStr) ? streak + 1 : 0
+        maxStreak = Math.max(maxStreak, streak)
+        cursor.setUTCDate(cursor.getUTCDate() + 1)
+    }
+
+    return maxStreak >= MAX_CONSECUTIVE_DAYS
+}
+
+/**
  * Main entry point.
  * Takes an open shift document and returns the top-ranked candidates.
  * Also fires off email notifications to those candidates.
@@ -99,6 +184,26 @@ async function findCoverCandidates(openShift) {
         const weeklyHours = await calculateWeeklyHours(staffIdStr, weekStart, weekEnd)
         if (weeklyHours + shiftHours > MAX_WEEKLY_HOURS) continue
 
+        // Skip if the rest period between this shift and their nearest shift is < 11 h
+        const restViolation = await violatesRestPeriod(staffIdStr, shiftDate, openShift.shift_start_time, openShift.shift_end_time)
+        if (restViolation) {
+            console.log(`Smart Match: skipping ${staffIdStr} — rest period violation (<${MIN_REST_HOURS}h gap)`)
+            continue
+        }
+
+        // Skip if the staff member has declared unavailability on this date/time
+        const availCheck = await isAvailableForShift(staffIdStr, shiftDate, openShift.shift_start_time, openShift.shift_end_time)
+        if (!availCheck.available) {
+            console.log(`Smart Match: skipping ${staffIdStr} — ${availCheck.reason}`)
+            continue
+        }
+
+        // Flag (but do not exclude) if this shift would create 7+ consecutive days
+        const consecutiveDaysAlert = await wouldExceedConsecutiveDays(staffIdStr, shiftDate)
+        if (consecutiveDaysAlert) {
+            console.warn(`Smart Match: ${staffIdStr} would reach ${MAX_CONSECUTIVE_DAYS}+ consecutive days`)
+        }
+
         // Build the feature payload for the ML ranker using recent clock-in history
         const history = await CLOCKIN.find({ staffMember : staff._id })
             .sort({ dateClockedIn : -1 })
@@ -116,12 +221,13 @@ async function findCoverCandidates(openShift) {
         })
 
         eligible.push({
-            staffId : staffIdStr,
-            email : staff.email,
-            staffName : staff.staffName,
-            historicalAcceptances : acceptanceHistory,
-            recentShiftCount : history.length,
-            avgHoursPerWeek : weeklyHours
+            staffId              : staffIdStr,
+            email                : staff.email,
+            staffName            : staff.staffName,
+            historicalAcceptances: acceptanceHistory,
+            recentShiftCount     : history.length,
+            avgHoursPerWeek      : weeklyHours,
+            consecutiveDaysAlert : consecutiveDaysAlert
         })
     }
 
@@ -161,7 +267,6 @@ async function findCoverCandidates(openShift) {
     const top = rankedCandidates.slice(0, TOP_N)
 
     // --- Step 3: Notify top candidates ---
-    // Build the notification payload expected by notifyCoverCandidates
     const notifyPayload = top.map((c) => ({
         email : c.email,
         staffName : c.staffName,
@@ -171,6 +276,11 @@ async function findCoverCandidates(openShift) {
         score : c.score
     }))
 
+    // Send coverage opportunity emails non-blocking so a mail failure never blocks the response
+    notifyCoverCandidates(notifyPayload).catch((err) =>
+        console.error('notifyCoverCandidates failed:', err.message)
+    )
+
     // Emit a socket event so the manager dashboard shows the open shift in real time
     try {
         const io = require('../utils/socket').getIO();
@@ -179,13 +289,13 @@ async function findCoverCandidates(openShift) {
         console.error('Socket error on shift_open emit:', socketErr);
     }
 
-    // Return only the fields needed by callers (controllers, intent router)
     return top.map((c) => ({
-        staffId : c.staffId,
-        staffName : c.staffName,
-        score : c.score,
-        rank : c.rank
+        staffId             : c.staffId,
+        staffName           : c.staffName,
+        score               : c.score,
+        rank                : c.rank,
+        consecutiveDaysAlert: c.consecutiveDaysAlert ?? false
     }))
 }
 
-module.exports = { findCoverCandidates, calculateWeeklyHours }
+module.exports = { findCoverCandidates, calculateWeeklyHours, violatesRestPeriod, wouldExceedConsecutiveDays }

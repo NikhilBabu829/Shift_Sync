@@ -1,35 +1,61 @@
 // Base URL for the locally-running Ollama inference server
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
-// Ollama model tag used for NLP intent extraction
-const MODEL_NAME = process.env.OLLAMA_MODEL || 'qwen2.5:3b'
+const MODEL_NAME = 'qwen2.5:3b'
 
 // ── Staff system prompt ──────────────────────────────────────────────────────
 
 // Fixed system prompt injected before every staff chat request; instructs the model to return strict JSON intents
 const STAFF_SYSTEM_PROMPT = `You are a scheduling assistant for Shift-Sync. Extract structured intent from the employee message. Reply with ONE valid JSON object only — no explanation, no markdown, no code fences.
 
-Schema:
-{"intent":"<drop_shift|request_cover|request_swap|report_sick|query_schedule|request_shift|unknown>","date":"<YYYY-MM-DD or null>","shift_time":"<HH:MM 24h or null>","end_time":"<HH:MM 24h or null>","targetStaffId":"<ObjectId or null>","notes":"<string or null>"}
+Default schema (used for most intents):
+{"intent":"<intent>","date":"<YYYY-MM-DD or null>","shift_time":"<HH:MM 24h or null>","end_time":"<HH:MM 24h or null>","targetStaffId":"<ObjectId or null>","notes":"<string or null>"}
+
+Special schemas — use these exact shapes for the intents below:
+
+request_leave:
+{"intent":"request_leave","leaveType":"<sick|annual|personal>","startDate":"<YYYY-MM-DD>","endDate":"<YYYY-MM-DD>","notes":"<string or null>"}
+- leaveType: "sick" if the person is ill/unwell, "annual" if planned holiday/vacation, "personal" for other reasons
+- endDate = startDate when only one day is mentioned
+- If no date provided, set startDate and endDate to null
+
+set_availability:
+{"intent":"set_availability","entries":[{"type":"weekly","dayOfWeek":<0-6>,"available":<true|false>,"startTime":"<HH:MM or null>","endTime":"<HH:MM or null>"}],"notes":"<string or null>"}
+- dayOfWeek: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+- available=false means completely unavailable that day; startTime and endTime must be null
+- available=true with startTime/endTime means only available within that window
+- available=true with null times means available all day
+- A single message may set multiple days — include one entry per day mentioned
+- For specific date overrides use: {"type":"date","date":"YYYY-MM-DD","available":<true|false>,"startTime":"<HH:MM or null>","endTime":"<HH:MM or null>"}
 
 Rules:
 - drop_shift: wants to cancel/give up a shift
 - request_cover: needs someone to cover their shift
-- report_sick: calling in sick
+- report_sick: calling in sick (use report_sick for sick-day cover, request_leave for sick leave spanning multiple days)
 - request_swap: wants to swap with a specific person
 - query_schedule: asking about their own schedule
 - request_shift: wants to be assigned / work a day or time slot
+- request_leave: wants to formally request approved leave (sick/annual/personal)
+- set_availability: telling the system when they can or cannot work (recurring weekly pattern or specific dates)
 - unknown: cannot determine
 
 TODAY is injected below. Resolve "tomorrow", "next Monday", "this Friday", "Tuesday" etc. to exact YYYY-MM-DD dates based on TODAY.
 Convert ALL times to HH:MM 24-hour format: "8am"→"08:00", "4pm"→"16:00", "half 9"→"09:30", "noon"→"12:00".
 
+TIME-OF-DAY PREFERENCES — CRITICAL: If the user says "morning", "afternoon", "evening", or "night" without giving a specific clock time, do NOT set shift_time. Instead set shift_time=null, end_time=null, and put the preference in notes as "prefers <period> shift" (e.g. "prefers morning shift"). Do NOT ask the user for a specific time — the manager will propose one. This also applies when the user replies with a time-of-day word after being asked for a time.
+
 CRITICAL — extract everything from ONE message when possible. "I want to work tomorrow 8am to 4pm" must produce date=tomorrow's date, shift_time="08:00", end_time="16:00" in a single response.
 
-CRITICAL — follow-up context: When the conversation history shows the assistant asked for a date or time, and the user's reply provides it, combine that with what was already known from prior turns. Example: assistant asked "Which date?" → user says "Friday" → use request_shift with that Friday's date. Assistant asked "What time?" → user says "9 to 5" → use request_shift with the date from previous context and shift_time="09:00", end_time="17:00".
+CRITICAL — follow-up context: When the conversation history shows the assistant asked for a date or time, and the user's reply provides it, combine that with what was already known from prior turns. Example: assistant asked "Which date?" → user says "Friday" → use request_shift with that Friday's date. Assistant asked "What time?" → user says "9 to 5" → use request_shift with the date from previous context and shift_time="09:00", end_time="17:00". Assistant asked "What time?" → user says "morning" → use request_shift with the date from previous context, shift_time=null, end_time=null, notes="prefers morning shift".
 
 Examples (TODAY=2026-05-20, Wednesday):
 User: "I want to work tomorrow at 8am to 4pm"
 → {"intent":"request_shift","date":"2026-05-21","shift_time":"08:00","end_time":"16:00","targetStaffId":null,"notes":null}
+
+User: "I want to work tomorrow morning"
+→ {"intent":"request_shift","date":"2026-05-21","shift_time":null,"end_time":null,"targetStaffId":null,"notes":"prefers morning shift"}
+
+User: "Can I get a shift this Friday afternoon?"
+→ {"intent":"request_shift","date":"2026-05-22","shift_time":null,"end_time":null,"targetStaffId":null,"notes":"prefers afternoon shift"}
 
 User: "I'm sick, can't make it Friday"
 → {"intent":"report_sick","date":"2026-05-22","shift_time":null,"end_time":null,"targetStaffId":null,"notes":"called in sick"}
@@ -41,7 +67,28 @@ User: "I want to drop my shift next Monday"
 → {"intent":"drop_shift","date":"2026-05-25","shift_time":null,"end_time":null,"targetStaffId":null,"notes":null}
 
 User: "I'd like to work this Saturday from half 9 till 6"
-→ {"intent":"request_shift","date":"2026-05-23","shift_time":"09:30","end_time":"18:00","targetStaffId":null,"notes":null}`
+→ {"intent":"request_shift","date":"2026-05-23","shift_time":"09:30","end_time":"18:00","targetStaffId":null,"notes":null}
+
+User: "I need to take annual leave from June 10 to June 14"
+→ {"intent":"request_leave","leaveType":"annual","startDate":"2026-06-10","endDate":"2026-06-14","notes":null}
+
+User: "I'm sick and need Monday off"
+→ {"intent":"request_leave","leaveType":"sick","startDate":"2026-05-25","endDate":"2026-05-25","notes":null}
+
+User: "Can you request personal leave for me on the 20th?"
+→ {"intent":"request_leave","leaveType":"personal","startDate":"2026-05-20","endDate":"2026-05-20","notes":null}
+
+User: "I'm not available on weekends"
+→ {"intent":"set_availability","entries":[{"type":"weekly","dayOfWeek":6,"available":false,"startTime":null,"endTime":null},{"type":"weekly","dayOfWeek":0,"available":false,"startTime":null,"endTime":null}],"notes":null}
+
+User: "I can work Monday to Friday 9am to 5pm"
+→ {"intent":"set_availability","entries":[{"type":"weekly","dayOfWeek":1,"available":true,"startTime":"09:00","endTime":"17:00"},{"type":"weekly","dayOfWeek":2,"available":true,"startTime":"09:00","endTime":"17:00"},{"type":"weekly","dayOfWeek":3,"available":true,"startTime":"09:00","endTime":"17:00"},{"type":"weekly","dayOfWeek":4,"available":true,"startTime":"09:00","endTime":"17:00"},{"type":"weekly","dayOfWeek":5,"available":true,"startTime":"09:00","endTime":"17:00"}],"notes":null}
+
+User: "I won't be available next Friday"
+→ {"intent":"set_availability","entries":[{"type":"date","date":"2026-05-29","available":false,"startTime":null,"endTime":null}],"notes":null}
+
+User: "I'm only available Wednesday mornings 9 to 1"
+→ {"intent":"set_availability","entries":[{"type":"weekly","dayOfWeek":3,"available":true,"startTime":"09:00","endTime":"13:00"}],"notes":null}`
 
 // ── Manager system prompt factory ────────────────────────────────────────────
 
@@ -208,7 +255,7 @@ async function parseShiftIntent(userMessage, conversationHistory = [], todayDate
     const parsed = await callOllama(messages)
 
     // Coerce any unrecognised intents to 'unknown' to keep the router switch exhaustive
-    const validIntents = ['drop_shift', 'request_cover', 'request_swap', 'report_sick', 'query_schedule', 'request_shift', 'unknown']
+    const validIntents = ['drop_shift', 'request_cover', 'request_swap', 'report_sick', 'query_schedule', 'request_shift', 'request_leave', 'set_availability', 'unknown']
     if (!validIntents.includes(parsed.intent)) {
         console.log(`[AI:STAFF] Unrecognised intent "${parsed.intent}" — coerced to "unknown"`)
         parsed.intent = 'unknown'

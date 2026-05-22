@@ -16,4 +16,7 @@ const ChatSessionSchema = new Schema({
     createdAt : {type : Date, default : Date.now}      // session creation timestamp
 })
 
+// The AI controller queries by staffMember + resolvedAt (null = open session)
+ChatSessionSchema.index({ staffMember: 1, resolvedAt: 1 })
+
 module.exports = mongoose.model('ChatSession', ChatSessionSchema)

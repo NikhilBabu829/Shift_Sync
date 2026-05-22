@@ -30,4 +30,9 @@ const ClockIn = new Schema({
     }
 })
 
+// Compound index covers the dedup check and the weekly-hours aggregation (both query by staffMember + date)
+ClockIn.index({ staffMember: 1, dateClockedIn: 1 })
+// Standalone index for date-only queries (e.g. getWeeklyAttendance fetches all clock-ins for a date set)
+ClockIn.index({ dateClockedIn: 1 })
+
 module.exports = mongoose.model("ClockIn", ClockIn)

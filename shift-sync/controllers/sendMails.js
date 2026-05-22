@@ -3,7 +3,7 @@ const nodemailer = require('nodemailer')
 // Wraps async functions and forwards thrown errors to Express error handler
 const asyncHandler = require('express-async-handler')
 // HTML email template builders for alert and notification emails
-const { gpsFlagAlert, shiftCoverNotification, faceMismatchAlert } = require('../utils/mailHtmls')
+const { gpsFlagAlert, shiftCoverNotification, faceMismatchAlert, leaveRequestSubmitted, leaveDecisionNotification, swapDeclinedNotification } = require('../utils/mailHtmls')
 
 // Gmail credentials pulled from environment variables
 const {
@@ -20,14 +20,17 @@ const transporter = nodemailer.createTransport({
     }
 })
 
-// Development/test route handler — sends a hardcoded test email to verify transporter works
+// Development/test route handler — sends a test email to verify transporter works
 exports.testMail = asyncHandler(async(req, res)=>{
+    if (!process.env.TEST_MAIL_RECIPIENT) {
+        return res.status(500).json({ message: 'TEST_MAIL_RECIPIENT is not set in environment variables.' })
+    }
     try{
         const mailService = await transporter.sendMail({
             from : GMAIL,
-            to : "nikhilbabu829@gmail.com",
-            subject : "This is a sample mail",
-            text : "This here is a sample mail to so and so",
+            to : process.env.TEST_MAIL_RECIPIENT,
+            subject : "Shift-Sync — mail transporter test",
+            text : "Mail transporter is working correctly.",
         })
         if(mailService.accepted){
             return res.status(200).json({
@@ -160,6 +163,36 @@ exports.notifyCoverCandidates = async (candidates) => {
     }
 }
 
+// Notifies the manager that a new leave request has been submitted; data contains { to, managerName, staffName, leaveType, startDate, endDate, notes }
+exports.notifyManagerNewLeave = async (data) => {
+    try {
+        const bodyHTML = leaveRequestSubmitted(data)
+        await transporter.sendMail({
+            from: GMAIL,
+            to: data.to,
+            subject: `Leave Request from ${data.staffName} — ${data.startDate} to ${data.endDate}`,
+            html: bodyHTML
+        })
+    } catch(err) {
+        console.error('Leave request notification email failed:', err.message)
+    }
+}
+
+// Notifies the staff member of the manager's leave decision; data contains { to, staffName, leaveType, startDate, endDate, status, managerNotes }
+exports.notifyStaffLeaveDecision = async (data) => {
+    try {
+        const bodyHTML = leaveDecisionNotification(data)
+        await transporter.sendMail({
+            from: GMAIL,
+            to: data.to,
+            subject: `Your Leave Request Has Been ${data.status === 'approved' ? 'Approved' : 'Denied'} — Shift-Sync`,
+            html: bodyHTML
+        })
+    } catch(err) {
+        console.error('Leave decision notification email failed:', err.message)
+    }
+}
+
 // Sends the manager's final swap approval email to a staff member; data.data contains { to, bodyHTML }
 exports.managerConfirmationEmail = asyncHandler(async (data)=>{
     try{
@@ -175,3 +208,18 @@ exports.managerConfirmationEmail = asyncHandler(async (data)=>{
         return err;
     }
 })
+
+// Notifies Staff A that Staff B has declined their swap request
+exports.swapDeclineNotifyStaffA = async (data) => {
+    try {
+        const bodyHTML = swapDeclinedNotification(data)
+        await transporter.sendMail({
+            from: GMAIL,
+            to: data.staffAEmail,
+            subject: `Your Shift Swap Request Was Declined — Shift-Sync`,
+            html: bodyHTML
+        })
+    } catch (err) {
+        console.error('Swap decline notification email failed:', err.message)
+    }
+}

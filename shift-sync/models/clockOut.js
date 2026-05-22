@@ -12,4 +12,9 @@ const ClockOutSchema = new Schema({
     isLate : {type : Boolean}          // true if the staff member left before or after their scheduled end
 })
 
+// clockInRecord is queried in getTodayLedger to join clock-outs to their clock-ins
+ClockOutSchema.index({ clockInRecord: 1 })
+// staffMember + timeClockedOut absence is how staffClockOut finds the open record
+ClockOutSchema.index({ staffMember: 1, timeClockedOut: 1 })
+
 module.exports = mongoose.model("ClockOut", ClockOutSchema)

@@ -16,4 +16,7 @@ const ManagerChatSessionSchema = new Schema({
     createdAt:      { type: Date, default: Date.now } // session creation timestamp
 })
 
+// The AI controller queries by manager + resolvedAt (null = open session)
+ManagerChatSessionSchema.index({ manager: 1, resolvedAt: 1 })
+
 module.exports = mongoose.model('ManagerChatSession', ManagerChatSessionSchema)
