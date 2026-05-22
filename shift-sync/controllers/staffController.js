@@ -16,6 +16,9 @@ const { initiateSwap, emailReviewToManager, staffAConfirmationMail, staffBConfir
 const { swapInitiate, staffConfirmationEmail, swapForwardToManagerEmail, notifyManagerGpsFlag, notifyManagerFaceMismatch } = require('./sendMails')
 // GPS fraud detection utilities (pure math, no I/O)
 const { runVelocityChecks, detectZeroVariance } = require('../services/gpsService')
+const { sendPushToMany } = require('../utils/webPush')
+// Google Calendar sync used when transferring shift ownership on a claim
+const { createShiftEvent, deleteShiftEvent } = require('../services/googleCalendarService')
 // Face descriptor verification utilities (pure math, no I/O)
 const { verifyFace, isValidDescriptor } = require('../services/faceService')
 // ML microservice client for GPS anomaly scoring
@@ -23,8 +26,6 @@ const mlService = require('../services/mlService')
 // Clock-in and clock-out models (lowercase imports used intentionally)
 const clockIn = require('../models/clockIn')
 const clockOut = require('../models/clockOut')
-
-const google = require('passport-google-oauth20').Strategy;
 
 // Validates an invite token by id; redirects to account creation if valid
 exports.checkAuthentication = asyncHandler(async(req, res)=>{
@@ -38,11 +39,6 @@ exports.checkAuthentication = asyncHandler(async(req, res)=>{
             res.redirect(`${process.env.BASE_URL}/api/create-staff-acc/${id}`)
         })
     }
-})
-
-// Stub route used during development to confirm the redirect chain works
-exports.simulatingUIForAccCreation = asyncHandler(async (req, res)=>{
-    res.send("We are connected and redirected successfully")
 })
 
 // Validates the invite token and triggers the Google OAuth flow, passing the token id as state
@@ -100,7 +96,7 @@ exports.getListOfAllStaffMembers = asyncHandler(async (req, res)=>{
 // Creates a pending swap shift record and emails Staff B to accept or reject the request
 exports.initiateSwap = asyncHandler(async (req, res)=>{
     try{
-        const { date, shift_start_time, shift_end_time, shift_length, swap_date, swap_belongs_to, swap_shift_start_time, swap_shift_end_time, swap_shift_length } = req.body
+        const { date, shift_start_time, shift_end_time, shift_length, swapDate, swap_belongs_to, swap_shift_start_time, swap_shift_end_time, swap_shift_length } = req.body
         // Resolve Staff A from the authenticated user id
         const belongs_to = await STAFF.findById(req.user.id)
         const swapStaff = await STAFF.findById(swap_belongs_to)
@@ -111,15 +107,30 @@ exports.initiateSwap = asyncHandler(async (req, res)=>{
             belongs_to : belongs_to._id,
             shift_start_time : shift_start_time,
             shift_end_time : shift_end_time,
-            swapDate : swap_date,
+            swapDate : swapDate,
             swap_belongs_to : swapStaff._id,
             swap_shift_start_time : swap_shift_start_time,
             swap_shift_end_time : swap_shift_end_time
         })
         await shiftData.save()
 
+        // Notify staff B in real time so the swap request appears in their notification bell immediately
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${swapStaff._id}`).emit('swap_request_received', {
+                shiftId: shiftData._id,
+                requesterName: belongs_to.staffName,
+                date,
+                shift_start_time,
+                shift_end_time,
+                swapDate,
+                swap_shift_start_time,
+                swap_shift_end_time
+            })
+        } catch(err) { console.error('[initiateSwap] Socket notify staff B failed:', err.message) }
+
         // Build the email body HTML containing the swap summary and acceptance link
-        const bodyHTML = initiateSwap({date, shift_start_time, shift_end_time, belongs_to, swap_date, swap_shift_start_time, swap_shift_end_time, swapStaff, id : shiftData.id})
+        const bodyHTML = initiateSwap({date, shift_start_time, shift_end_time, belongs_to, swapDate, swap_shift_start_time, swap_shift_end_time, swapStaff, id : shiftData.id})
 
         const swapInitiateResponse = await swapInitiate({to : swapStaff.email, belongsToStaffName : belongs_to.staffName, date : date, shift_start_time : shift_start_time, shift_end_time : shift_end_time, bodyHTML : bodyHTML})
 
@@ -147,20 +158,33 @@ exports.initiateSwap = asyncHandler(async (req, res)=>{
 // Staff B accepts the swap — sends confirmation emails to both parties and forwards to a random manager
 exports.staffBAccepts = asyncHandler(async (req, res)=>{
     const {id} = req.params
+    // Formats a stored date (YYYY-MM-DD string or Date object) as a readable string
+    // using local time so YYYY-MM-DD values never shift a day in non-UTC timezones
+    const toDisplayDate = (v) => {
+        if (!v) return ''
+        if (v instanceof Date) return v.toDateString()
+        const s = String(v)
+        const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(s + 'T00:00:00') : new Date(s)
+        return isNaN(d) ? s : d.toDateString()
+    }
     try{
-        const shiftDetails = await SHIFT.findById(id)
-        const staffB = await STAFF.findById(shiftDetails.swap_belongs_to)
-        const staffA = await STAFF.findById(shiftDetails.belongs_to)
-        const managers = await MANAGER.find()
+        const [shiftDetails, managers] = await Promise.all([
+            SHIFT.findById(id),
+            MANAGER.find().select('email first_name pushSubscriptions').lean()
+        ])
+        const [staffB, staffA] = await Promise.all([
+            STAFF.findById(shiftDetails.swap_belongs_to),
+            STAFF.findById(shiftDetails.belongs_to)
+        ])
         // Pick a manager at random to handle the approval; avoids assigning to a specific manager
         const randomManager = Math.floor(Math.random() * managers.length)
         const data = {
             id : shiftDetails.id,
-            date : shiftDetails.date.toDateString(),
+            date : toDisplayDate(shiftDetails.date),
             belongs_to : staffA.staffName,
             shift_start_time : shiftDetails.shift_start_time,
             shift_end_time : shiftDetails.shift_end_time,
-            swapDate : shiftDetails.swapDate.toDateString(),
+            swapDate : toDisplayDate(shiftDetails.swapDate),
             swap_belongs_to : staffB.staffName,
             swap_shift_start_time : shiftDetails.swap_shift_start_time,
             swap_shift_end_time : shiftDetails.swap_shift_end_time,
@@ -180,6 +204,26 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
                   if(staffAConfirmation.accepted && staffAConfirmation.accepted.length > 0){
                     const swapForwardToManager = await swapForwardToManagerEmail({to : managers[randomManager].email, bodyHTML : managerMailBodyHTML, belongs_to : data.belongs_to, swap_belongs_to : data.swap_belongs_to})
                     if(swapForwardToManager.accepted && swapForwardToManager.accepted.length > 0){
+                        // Push notification to all managers — a swap is waiting for their approval (reuse the already-fetched managers list)
+                        const allSubs = managers.flatMap(m => m.pushSubscriptions || [])
+                        sendPushToMany(allSubs, {
+                            title: 'Shift Swap Pending Approval',
+                            body: `${data.belongs_to} and ${data.swap_belongs_to} have agreed to swap shifts — review it in the dashboard.`,
+                            icon: '/favicon.ico',
+                            tag: `swap-${data.id}`
+                        })
+
+                        // Real-time in-app notification to all managers via Socket.io
+                        try {
+                            const io = require('../utils/socket').getIO()
+                            io.to('managers').emit('swap_pending_approval', {
+                                staffAName: data.belongs_to,
+                                staffBName: data.swap_belongs_to,
+                                date: data.date,
+                                swapDate: data.swapDate
+                            })
+                        } catch { /* socket may not be initialised in test environments */ }
+
                         res.status(200).json({
                             message : "Your Response has now been sent to the manager, please check you email for confirmation of the forward"
                         })
@@ -442,9 +486,92 @@ exports.respondToShiftProposal = asyncHandler(async (req, res) => {
     }
     request.status = action === 'accept' ? 'staff_agreed' : 'denied'
     await request.save()
+
+    if (action === 'accept') {
+        try {
+            const io = require('../utils/socket').getIO()
+            const populated = await SHIFT_REQUEST.findById(request._id)
+                .populate('staffMember', 'staffName email role department')
+                .lean()
+            io.to('managers').emit('shift_proposal_responded', populated)
+        } catch { /* non-critical */ }
+    }
+
     return res.status(200).json({
         message: action === 'accept'
             ? 'Shift accepted — your manager will confirm shortly'
             : 'Shift proposal declined'
     })
+})
+
+// Staff member claims an open-cover shift from the Marketplace.
+// Validates no double-booking, transfers ownership, syncs Google Calendar, and notifies managers.
+exports.claimOpenShift = asyncHandler(async (req, res) => {
+    const { id } = req.params
+    const staffId = req.user.id
+
+    const shift = await SHIFT.findById(id)
+    if (!shift) return res.status(404).json({ message: 'Shift not found.' })
+    if (shift.status !== 'open_cover') {
+        return res.status(409).json({ message: 'This shift has already been claimed or is no longer available.' })
+    }
+
+    // Can't reclaim your own dropped shift
+    if (String(shift.belongs_to) === String(staffId)) {
+        return res.status(409).json({ message: "You can't claim your own shift." })
+    }
+
+    // Prevent double-booking on the same date
+    const existing = await SHIFT.findOne({ belongs_to: staffId, date: shift.date, status: 'filled' })
+    if (existing) {
+        return res.status(409).json({ message: `You already have a shift on ${shift.date}.` })
+    }
+
+    // Remove the original owner's Google Calendar event before reassigning
+    if (shift.googleCalendarEventId) {
+        const originalOwner = await STAFF.findById(shift.belongs_to)
+        if (originalOwner) await deleteShiftEvent(originalOwner, shift.googleCalendarEventId).catch(() => {})
+    }
+
+    // Transfer ownership and reactivate the shift
+    shift.belongs_to = staffId
+    shift.status = 'filled'
+    shift.googleCalendarEventId = null
+    await shift.save()
+
+    // Mirror the shift in the new owner's Google Calendar
+    const claimer = await STAFF.findById(staffId)
+    if (claimer?.googleAccessToken) {
+        const calEventId = await createShiftEvent(claimer, shift)
+        if (calEventId) {
+            shift.googleCalendarEventId = calEventId
+            await shift.save()
+        }
+    }
+
+    // Real-time events — update manager dashboard and remove the card from all staff Marketplace lists
+    try {
+        const io = require('../utils/socket').getIO()
+        io.to('managers').emit('shift_claimed', {
+            shiftId: shift._id,
+            date: shift.date,
+            claimerName: claimer?.staffName || 'A staff member',
+            shift_start_time: shift.shift_start_time,
+            shift_end_time: shift.shift_end_time
+        })
+        // Broadcast to all connected clients so the card disappears from every open Marketplace view
+        io.emit('marketplace_shift_taken', { shiftId: String(shift._id) })
+    } catch { /* socket not initialised in test environments */ }
+
+    // Push notification to all managers
+    const managers = await MANAGER.find().select('pushSubscriptions').lean()
+    const allSubs = managers.flatMap(m => m.pushSubscriptions || [])
+    sendPushToMany(allSubs, {
+        title: 'Open Shift Claimed',
+        body: `${claimer?.staffName || 'A staff member'} claimed the open shift on ${shift.date} (${shift.shift_start_time}–${shift.shift_end_time}).`,
+        icon: '/favicon.ico',
+        tag: `claimed-${shift._id}`
+    })
+
+    return res.status(200).json({ message: 'Shift claimed successfully.' })
 })

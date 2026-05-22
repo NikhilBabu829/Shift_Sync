@@ -24,6 +24,7 @@ const {inviteMember, managerConfirmationEmail} = require('./sendMails')
 
 // Google Calendar integration — creates/deletes events on staff members' calendars
 const { createShiftEvent, deleteShiftEvent } = require('../services/googleCalendarService')
+const { sendPush, sendPushToMany } = require('../utils/webPush')
 
 // HTML template builders for outgoing emails
 const { sendingToken, managerConfirmationMail } = require('../utils/mailHtmls')
@@ -208,8 +209,15 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
             const staffA = await STAFF.findById(shiftDetails.belongs_to)
             const staffB = await STAFF.findById(shiftDetails.swap_belongs_to)
             const Manager = await MANAGER.findById(req.user.id)
-            // Normalise date values to readable strings regardless of storage type
-            const toDateStr = (v) => v ? (v instanceof Date ? v.toDateString() : String(v)) : ''
+            // Normalise a stored date value to a readable string, forcing local-time
+            // interpretation so YYYY-MM-DD strings don't shift a day in non-UTC zones
+            const toDateStr = (v) => {
+                if (!v) return ''
+                if (v instanceof Date) return v.toDateString()
+                const s = String(v)
+                const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(s + 'T00:00:00') : new Date(s)
+                return isNaN(d) ? s : d.toDateString()
+            }
             const shift = {
                 date : toDateStr(shiftDetails.date),
                 shift_start_time : shiftDetails.shift_start_time,
@@ -228,33 +236,86 @@ exports.swapFinalApproval = asyncHandler(async (req, res)=>{
                     // Only update the DB status after both emails are confirmed delivered
                     await SHIFT.findByIdAndUpdate(id, { status: 'approved' })
 
-                    // Normalise a stored date value to YYYY-MM-DD for DB queries
+                    // Push notification to both staff members — their swap is now approved
+                    const swapDate = shift.swapDate || shift.date
+                    sendPush(staffA.pushSubscription, {
+                        title: 'Shift Swap Approved',
+                        body: `Your swap with ${staffB.staffName} has been approved by your manager.`,
+                        icon: '/favicon.ico',
+                        tag: `swap-approved-${id}`
+                    })
+                    sendPush(staffB.pushSubscription, {
+                        title: 'Shift Swap Approved',
+                        body: `Your swap with ${staffA.staffName} has been approved by your manager.`,
+                        icon: '/favicon.ico',
+                        tag: `swap-approved-${id}`
+                    })
+
+                    // Real-time in-app notification to both staff via Socket.io
+                    try {
+                        const io = require('../utils/socket').getIO()
+                        io.to(`staff_${staffA._id}`).emit('swap_approved', {
+                            withName: staffB.staffName,
+                            date: shift.date,
+                            swapDate: shift.swapDate
+                        })
+                        io.to(`staff_${staffB._id}`).emit('swap_approved', {
+                            withName: staffA.staffName,
+                            date: shift.swapDate,
+                            swapDate: shift.date
+                        })
+                    } catch { /* socket may not be initialised in test environments */ }
+
+                    // Normalise a stored date value to YYYY-MM-DD using local-time components
+                    // so it never shifts a day due to UTC conversion in non-UTC timezones
                     const toISO = (v) => {
                         if (!v) return null
-                        const d = v instanceof Date ? v : new Date(v)
-                        return isNaN(d) ? String(v).split('T')[0] : d.toISOString().split('T')[0]
+                        const s = String(v)
+                        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+                        const d = v instanceof Date ? v : (/^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(s + 'T00:00:00') : new Date(s))
+                        if (isNaN(d)) return null
+                        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
                     }
                     const dateA = toISO(shiftDetails.date)       // Staff A's original date
                     const dateB = toISO(shiftDetails.swapDate)   // Staff B's original date
 
-                    // Find both filled shifts so we can swap ownership and update Calendar events
+                    // Try to find the existing filled roster shifts (best-effort — used to delete old
+                    // calendar events and update roster ownership, but calendar creation never blocks on them)
                     const shiftA = dateA ? await SHIFT.findOne({ belongs_to: staffA._id, date: dateA, status: 'filled' }) : null
                     const shiftB = dateB ? await SHIFT.findOne({ belongs_to: staffB._id, date: dateB, status: 'filled' }) : null
 
+                    if (!shiftA || !shiftB) {
+                        console.warn(`[Swap] Roster shift not found — dateA: ${dateA} shiftA: ${!!shiftA}, dateB: ${dateB} shiftB: ${!!shiftB}. Calendar events will be created from swap data.`)
+                    }
+
+                    // Build shift-like objects from the swap document to use when the filled roster
+                    // shift can't be located — all data needed for the calendar event is embedded in
+                    // the swap request document
+                    const shiftAData = shiftA || {
+                        date: dateA,
+                        shift_start_time: shiftDetails.shift_start_time,
+                        shift_end_time: shiftDetails.shift_end_time
+                    }
+                    const shiftBData = shiftB || {
+                        date: dateB,
+                        shift_start_time: shiftDetails.swap_shift_start_time,
+                        shift_end_time: shiftDetails.swap_shift_end_time
+                    }
+
                     // Delete Staff A's old Calendar event then create one for Staff B on that date
+                    if (shiftA?.googleCalendarEventId) await deleteShiftEvent(staffA, shiftA.googleCalendarEventId)
+                    const newIdA = await createShiftEvent(staffB, shiftAData)
                     if (shiftA) {
-                        if (shiftA.googleCalendarEventId) await deleteShiftEvent(staffA, shiftA.googleCalendarEventId)
                         shiftA.belongs_to = staffB._id
-                        const newIdA = await createShiftEvent(staffB, shiftA)
                         shiftA.googleCalendarEventId = newIdA || null
                         await shiftA.save()
                     }
 
                     // Delete Staff B's old Calendar event then create one for Staff A on that date
+                    if (shiftB?.googleCalendarEventId) await deleteShiftEvent(staffB, shiftB.googleCalendarEventId)
+                    const newIdB = await createShiftEvent(staffA, shiftBData)
                     if (shiftB) {
-                        if (shiftB.googleCalendarEventId) await deleteShiftEvent(staffB, shiftB.googleCalendarEventId)
                         shiftB.belongs_to = staffA._id
-                        const newIdB = await createShiftEvent(staffA, shiftB)
                         shiftB.googleCalendarEventId = newIdB || null
                         await shiftB.save()
                     }
@@ -593,6 +654,30 @@ exports.proposeShiftTime = asyncHandler(async (req, res) => {
     request.proposedEndTime   = endTime.trim()
     request.status = 'proposed'
     await request.save()
+
+    try {
+        const io = require('../utils/socket').getIO()
+        io.to(`staff_${request.staffMember}`).emit('shift_proposal_received', {
+            _id: request._id,
+            requestedDate: request.requestedDate,
+            proposedStartTime: request.proposedStartTime,
+            proposedEndTime: request.proposedEndTime,
+            notes: request.notes,
+            status: request.status
+        })
+    } catch { /* socket may not be initialised in test environments */ }
+
+    // Push notification to the staff member — manager proposed a shift time for their request
+    try {
+        const staffMember = await STAFF.findById(request.staffMember).select('pushSubscription')
+        sendPush(staffMember?.pushSubscription, {
+            title: 'Shift Time Proposed',
+            body: `Your manager has proposed a shift time for ${request.requestedDate}: ${startTime} – ${endTime}. Check your dashboard to respond.`,
+            icon: '/favicon.ico',
+            tag: `proposal-${request._id}`
+        })
+    } catch { /* non-critical */ }
+
     return res.status(200).json({ message: 'Time proposal sent to staff member for review' })
 })
 
@@ -639,11 +724,52 @@ exports.resolveShiftRequest = asyncHandler(async (req, res) => {
             }
         }
 
+        try {
+            const io = require('../utils/socket').getIO()
+            io.to(`staff_${request.staffMember}`).emit('shift_request_resolved', {
+                requestId: request._id,
+                status: 'approved',
+                requestedDate: request.requestedDate
+            })
+        } catch { /* non-critical */ }
+
+        // Push notification to the staff member — their request was approved
+        try {
+            const staffMember = await STAFF.findById(request.staffMember).select('pushSubscription')
+            sendPush(staffMember?.pushSubscription, {
+                title: 'Shift Request Approved',
+                body: `Your shift request for ${request.requestedDate} has been approved and added to your roster.`,
+                icon: '/favicon.ico',
+                tag: `request-approved-${request._id}`
+            })
+        } catch { /* non-critical */ }
+
         return res.status(200).json({ message: 'Shift confirmed and added to roster' })
     }
 
     // Deny path — update status only, no shift is created
     request.status = 'denied'
     await request.save()
+
+    try {
+        const io = require('../utils/socket').getIO()
+        io.to(`staff_${request.staffMember}`).emit('shift_request_resolved', {
+            requestId: request._id,
+            status: 'denied',
+            requestedDate: request.requestedDate
+        })
+    } catch { /* non-critical */ }
+
+    // Push notification to the staff member — their request was denied
+    try {
+        const staffMember = await STAFF.findById(request.staffMember).select('pushSubscription')
+        sendPush(staffMember?.pushSubscription, {
+            title: 'Shift Request Denied',
+            body: `Your shift request for ${request.requestedDate} was not approved. Contact your manager for details.`,
+            icon: '/favicon.ico',
+            tag: `request-denied-${request._id}`
+        })
+    } catch { /* non-critical */ }
+
     return res.status(200).json({ message: 'Request denied' })
 })
