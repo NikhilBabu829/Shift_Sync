@@ -20,6 +20,8 @@ module.exports = {
                     socket.join(`staff_${userId}`)
                 } else if (role === 'manager') {
                     socket.join('managers')
+                    // Also join a personal room so department-targeted swap notifications work
+                    if (userId) socket.join(`manager-${userId}`)
                 }
             })
         })

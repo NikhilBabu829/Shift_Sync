@@ -60,3 +60,15 @@ class RankedCandidate(BaseModel):
 
 class RankStaffResponse(BaseModel):
     rankedCandidates: list[RankedCandidate]
+
+
+# --- Retrain ---
+
+class RetrainRequest(BaseModel):
+    trainingData: list[StaffCandidate]
+
+
+class RetrainResponse(BaseModel):
+    status: str
+    staffCount: int
+    sampleCount: int

@@ -168,16 +168,23 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
         return isNaN(d) ? s : d.toDateString()
     }
     try{
-        const [shiftDetails, managers] = await Promise.all([
+        const [shiftDetails, allManagers] = await Promise.all([
             SHIFT.findById(id),
-            MANAGER.find().select('email first_name pushSubscriptions').lean()
+            MANAGER.find().select('email first_name departments pushSubscriptions').lean()
         ])
         const [staffB, staffA] = await Promise.all([
             STAFF.findById(shiftDetails.swap_belongs_to),
             STAFF.findById(shiftDetails.belongs_to)
         ])
-        // Pick a manager at random to handle the approval; avoids assigning to a specific manager
-        const randomManager = Math.floor(Math.random() * managers.length)
+
+        // Route to managers who cover staffA's department; fall back to all managers if none are configured
+        const staffDept = staffA.department
+        const deptManagers = staffDept
+            ? allManagers.filter(m => m.departments && m.departments.includes(staffDept))
+            : []
+        const managers = deptManagers.length > 0 ? deptManagers : allManagers
+        const assignedManager = managers[0]
+
         const data = {
             id : shiftDetails.id,
             date : toDisplayDate(shiftDetails.date),
@@ -188,7 +195,7 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
             swap_belongs_to : staffB.staffName,
             swap_shift_start_time : shiftDetails.swap_shift_start_time,
             swap_shift_end_time : shiftDetails.swap_shift_end_time,
-            manager : managers[randomManager].first_name
+            manager : assignedManager.first_name
         }
         // Guard: only Staff B (the swap target) can accept
         if(staffB.id === req.user.id){
@@ -197,26 +204,29 @@ exports.staffBAccepts = asyncHandler(async (req, res)=>{
             const staffABodyHTML = staffAConfirmationMail(data)
             const managerMailBodyHTML = emailReviewToManager(data)
 
-            // Chain the three emails: B → A → Manager (each only sent if the previous succeeds)
+            // Chain the three emails: B → A → assigned manager
             const staffBConfirmation = await staffConfirmationEmail({to : staffB.email, bodyHTML : staffBBodyHTML, id : data.id})
             if(staffBConfirmation.accepted && staffBConfirmation.accepted.length > 0){
                 const staffAConfirmation = await staffConfirmationEmail({to : staffA.email, bodyHTML : staffABodyHTML, id : data.id})
                   if(staffAConfirmation.accepted && staffAConfirmation.accepted.length > 0){
-                    const swapForwardToManager = await swapForwardToManagerEmail({to : managers[randomManager].email, bodyHTML : managerMailBodyHTML, belongs_to : data.belongs_to, swap_belongs_to : data.swap_belongs_to})
+                    const swapForwardToManager = await swapForwardToManagerEmail({to : assignedManager.email, bodyHTML : managerMailBodyHTML, belongs_to : data.belongs_to, swap_belongs_to : data.swap_belongs_to})
                     if(swapForwardToManager.accepted && swapForwardToManager.accepted.length > 0){
-                        // Push notification to all managers — a swap is waiting for their approval (reuse the already-fetched managers list)
-                        const allSubs = managers.flatMap(m => m.pushSubscriptions || [])
-                        sendPushToMany(allSubs, {
+                        // Stamp the shift with the assigned manager so getPendingSwaps can filter correctly
+                        await SHIFT.findByIdAndUpdate(id, { assigned_manager: assignedManager._id })
+
+                        // Push notification only to the relevant manager(s) for this department
+                        const relevantSubs = managers.flatMap(m => m.pushSubscriptions || [])
+                        sendPushToMany(relevantSubs, {
                             title: 'Shift Swap Pending Approval',
                             body: `${data.belongs_to} and ${data.swap_belongs_to} have agreed to swap shifts — review it in the dashboard.`,
                             icon: '/favicon.ico',
                             tag: `swap-${data.id}`
                         })
 
-                        // Real-time in-app notification to all managers via Socket.io
+                        // Real-time in-app notification to the assigned manager's socket room
                         try {
                             const io = require('../utils/socket').getIO()
-                            io.to('managers').emit('swap_pending_approval', {
+                            io.to(`manager-${assignedManager._id}`).emit('swap_pending_approval', {
                                 staffAName: data.belongs_to,
                                 staffBName: data.swap_belongs_to,
                                 date: data.date,
@@ -361,8 +371,46 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
         let faceVerification = { registered: hasStoredDescriptor, isVerified: null, distance: null }
         if (hasStoredDescriptor && incomingDescriptor && isValidDescriptor(incomingDescriptor)) {
             const result = verifyFace(staffRecord.faceDescriptor, incomingDescriptor)
-            faceVerification.isVerified = result.isVerified
-            faceVerification.distance = result.distance
+            faceVerification.isVerified    = result.isVerified
+            faceVerification.isStrongMatch = result.isStrongMatch
+            faceVerification.distance      = result.distance
+        }
+
+        // --- Face gate: enforce before writing any records ---
+        if (hasStoredDescriptor && incomingDescriptor && isValidDescriptor(incomingDescriptor)) {
+            if (faceVerification.isVerified === false) {
+                // Hard mismatch — email every manager and deny the clock-in
+                const [staffMember, managers] = await Promise.all([
+                    STAFF.findById(req.user.id).select('staffName'),
+                    MANAGER.find().select('email first_name')
+                ])
+                const faceMismatchData = {
+                    staffName     : staffMember.staffName,
+                    dateClockedIn : serverToday,
+                    timeClockedIn : new Date().toLocaleTimeString(),
+                    startOfShift  : assignedShift.shift_start_time,
+                    endOfShift    : assignedShift.shift_end_time,
+                    distance      : faceVerification.distance,
+                    threshold     : 0.4
+                }
+                for (const manager of managers) {
+                    notifyManagerFaceMismatch(manager.email, { ...faceMismatchData, managerName: manager.first_name || 'Manager' })
+                }
+                return res.status(403).json({
+                    message      : 'Face verification failed. Your manager has been notified. Clock-in denied.',
+                    faceMismatch : true,
+                    faceVerification
+                })
+            }
+
+            if (faceVerification.isVerified === true && !faceVerification.isStrongMatch) {
+                // Matched but low confidence (distance 0.35–0.4) — ask to re-clock, do not save
+                return res.status(200).json({
+                    requiresReclock : true,
+                    message         : 'Face matched but confidence is low. Please re-position your face and try clocking in again.',
+                    faceVerification
+                })
+            }
         }
 
         const now = new Date()
@@ -420,48 +468,30 @@ exports.staffClockIn = asyncHandler(async (req, res)=>{
             })
         } catch { /* socket unavailable — manager dashboard will show on next refresh */ }
 
-        // --- Notify managers if flagged (non-blocking, runs after response) ---
-        if(isDriveByPunch || isSpoofedGPS || faceVerification.isVerified === false){
+        // --- Notify managers if GPS-flagged (non-blocking, runs after response) ---
+        if(isDriveByPunch || isSpoofedGPS){
             const staffMember = await STAFF.findById(req.user.id).select('staffName')
             const managers = await MANAGER.find().select('email first_name')
 
-            if(isDriveByPunch || isSpoofedGPS){
-                const gpsAlertData = {
-                    staffName     : staffMember.staffName,
-                    managerName   : managers[0]?.first_name || 'Manager',
-                    dateClockedIn : serverToday,
-                    timeClockedIn : now.toLocaleTimeString(),
-                    isDriveByPunch,
-                    isSpoofedGPS,
-                    velocityMph   : maxVelocityMph
-                }
-                // Broadcast the GPS warning to all connected dashboard clients via socket
-                try {
-                    const io = require('../utils/socket').getIO()
-                    io.emit('gps_warning', gpsAlertData)
-                } catch (socketErr) {
-                    console.error('Socket error on gps_warning emit:', socketErr)
-                }
-                // Email every manager about the suspicious clock-in
-                for(const manager of managers){
-                    notifyManagerGpsFlag(manager.email, { ...gpsAlertData, managerName: manager.first_name || 'Manager' })
-                }
+            const gpsAlertData = {
+                staffName     : staffMember.staffName,
+                managerName   : managers[0]?.first_name || 'Manager',
+                dateClockedIn : serverToday,
+                timeClockedIn : now.toLocaleTimeString(),
+                isDriveByPunch,
+                isSpoofedGPS,
+                velocityMph   : maxVelocityMph
             }
-
-            if(faceVerification.isVerified === false){
-                const faceMismatchData = {
-                    staffName     : staffMember.staffName,
-                    dateClockedIn : serverToday,
-                    timeClockedIn : now.toLocaleTimeString(),
-                    startOfShift  : assignedShift.shift_start_time,
-                    endOfShift    : assignedShift.shift_end_time,
-                    distance      : faceVerification.distance,
-                    threshold     : 0.4
-                }
-                // Alert each manager by email about the face mismatch
-                for(const manager of managers){
-                    notifyManagerFaceMismatch(manager.email, { ...faceMismatchData, managerName: manager.first_name || 'Manager' })
-                }
+            // Broadcast the GPS warning to all connected manager dashboard clients via socket
+            try {
+                const io = require('../utils/socket').getIO()
+                io.to('managers').emit('gps_warning', gpsAlertData)
+            } catch (socketErr) {
+                console.error('Socket error on gps_warning emit:', socketErr)
+            }
+            // Email every manager about the suspicious clock-in
+            for(const manager of managers){
+                notifyManagerGpsFlag(manager.email, { ...gpsAlertData, managerName: manager.first_name || 'Manager' })
             }
         }
 

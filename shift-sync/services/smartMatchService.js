@@ -284,7 +284,7 @@ async function findCoverCandidates(openShift) {
     // Emit a socket event so the manager dashboard shows the open shift in real time
     try {
         const io = require('../utils/socket').getIO();
-        io.emit('shift_open', { shift: openShift, candidates: top });
+        io.to('managers').emit('shift_open', { shift: openShift, candidates: top });
     } catch (socketErr) {
         console.error('Socket error on shift_open emit:', socketErr);
     }

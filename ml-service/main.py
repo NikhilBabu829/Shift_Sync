@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,11 +8,29 @@ from schemas import (
     GPSAnomalyResponse,
     RankStaffRequest,
     RankStaffResponse,
+    RetrainRequest,
+    RetrainResponse,
 )
 from models.gps_anomaly import GPSAnomalyDetector
 from models.staff_ranker import StaffRanker
 
-app = FastAPI(title="Shift-Sync ML Service", version="1.0.0")
+# Persisted ranker loaded from disk at startup; replaced after each retrain
+_global_ranker: StaffRanker | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _global_ranker
+    ranker = StaffRanker()
+    if ranker.load():
+        _global_ranker = ranker
+        print("[ml-service] Loaded persisted staff ranker model.")
+    else:
+        print("[ml-service] No persisted model found — will use inline training until first retrain.")
+    yield
+
+
+app = FastAPI(title="Shift-Sync ML Service", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,11 +69,11 @@ def gps_anomaly(body: GPSAnomalyRequest):
 @app.post("/ml/rank-staff", response_model=RankStaffResponse)
 def rank_staff(body: RankStaffRequest):
     """
-    Ranks eligible staff by their likelihood to accept an open shift
-    using a Random Forest trained on historical clock-in patterns.
-    Falls back to a heuristic sort on cold start.
+    Ranks eligible staff by their likelihood to accept an open shift.
+    Uses the persisted weekly-trained model when available; falls back to
+    inline training on cold start.
     """
-    ranker = StaffRanker()
+    ranker = _global_ranker if _global_ranker is not None else StaffRanker()
 
     candidates_dicts = [
         {
@@ -81,3 +100,39 @@ def rank_staff(body: RankStaffRequest):
     ranked = ranker.rank(shift_dict, candidates_dicts)
 
     return RankStaffResponse(rankedCandidates=ranked)
+
+
+@app.post("/ml/retrain", response_model=RetrainResponse)
+def retrain_model(body: RetrainRequest):
+    """
+    Retrains the staff ranker on the provided historical data and persists the
+    model to disk. Called by the Node.js weekly cron every Sunday at midnight.
+    """
+    global _global_ranker
+
+    candidates = [
+        {
+            "staffId": c.staffId,
+            "historicalAcceptances": [
+                {"dayOfWeek": h.dayOfWeek, "hour": h.hour, "accepted": h.accepted}
+                for h in c.historicalAcceptances
+            ],
+            "recentShiftCount": c.recentShiftCount,
+            "avgHoursPerWeek": c.avgHoursPerWeek,
+        }
+        for c in body.trainingData
+    ]
+
+    sample_count = sum(len(c["historicalAcceptances"]) for c in candidates)
+
+    ranker = StaffRanker()
+    result = ranker.fit_and_save(candidates)
+
+    if result["status"] == "trained":
+        _global_ranker = ranker
+
+    return RetrainResponse(
+        status=result["status"],
+        staffCount=len(candidates),
+        sampleCount=sample_count,
+    )

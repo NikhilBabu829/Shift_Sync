@@ -1,4 +1,20 @@
+# Node
 shift-sync/node_modules/
 shift-sync/.env
+
+# Python cache
+ml-service/__pycache__/
+ml-service/**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Sensitive / local-only
 shift-sync/GEMINI.md
 shift-sync/CONTEXT.md
+
+# Unrelated artifacts
+dissertation_template/
+
+# OS
+.DS_Store

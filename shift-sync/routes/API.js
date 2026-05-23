@@ -20,7 +20,7 @@ const CLCOKIN = require("../models/clockIn")
 const CLOCKOUT = require("../models/clockOut")
 
 // Manager controller exports
-const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getPendingShiftRequests, proposeShiftTime, resolveShiftRequest, getOrgLocations, addOrgLocation, removeOrgLocation } = require('../controllers/managerController')
+const { manager_sign_up, manager_invite, get_pending_invitations, revoke_invitation, resend_invitation, swapFinalApproval, download_attendance, denySwap, getManagerStaff, getRoster, addRosterShift, removeRosterShift, getTodayLedger, getWeeklyAttendance, getShiftStats, getOrgRoles, addOrgRole, removeOrgRole, getOrgDepartments, addOrgDepartment, removeOrgDepartment, getPendingShiftRequests, proposeShiftTime, resolveShiftRequest, getOrgLocations, addOrgLocation, removeOrgLocation, getPendingSwaps, updateManagerDepartments } = require('../controllers/managerController')
 // Staff controller exports
 const { checkAuthentication, creatingStaffAccount, getListOfAllStaffMembers, initiateSwap, staffBAccepts, staffBDeclines, staffClockIn, staffClockOut, registerFace, getMyShiftProposals, respondToShiftProposal, claimOpenShift } = require('../controllers/staffController')
 // AI chat handlers for staff and manager
@@ -124,11 +124,11 @@ router.post("/swap-final-approval/:id", authMiddleWare, swapFinalApproval)
 // Manager denies a pending swap — deletes the swap shift record
 router.post("/deny-swap/:id", authMiddleWare, denySwap)
 
-// Returns all shifts currently in pending_swap status waiting for manager approval
-router.get("/pending-swaps", authMiddleWare, async (req, res)=>{
-    const { getPendingSwaps } = require('../controllers/managerController');
-    return getPendingSwaps(req, res);
-})
+// Returns pending swaps for the authenticated manager (filtered by department if configured)
+router.get("/pending-swaps", authMiddleWare, getPendingSwaps)
+
+// Updates the list of departments this manager is responsible for
+router.put("/manager-departments", authMiddleWare, updateManagerDepartments)
 
 // Returns all staff members with basic profile fields (name, email, dept, role)
 router.get("/manager-staff", authMiddleWare, getManagerStaff)
@@ -155,6 +155,11 @@ router.get("/shift-stats", authMiddleWare, getShiftStats)
 router.get("/org-roles", authMiddleWare, getOrgRoles)
 router.post("/org-roles", authMiddleWare, addOrgRole)
 router.post("/org-roles/remove", authMiddleWare, removeOrgRole)
+
+// CRUD for organisation-defined team/department types stored on the Manager document
+router.get("/org-departments", authMiddleWare, getOrgDepartments)
+router.post("/org-departments", authMiddleWare, addOrgDepartment)
+router.post("/org-departments/remove", authMiddleWare, removeOrgDepartment)
 
 // CRUD for organisation site locations — used for multi-site GPS geo-fencing
 router.get("/org-locations", authMiddleWare, getOrgLocations)

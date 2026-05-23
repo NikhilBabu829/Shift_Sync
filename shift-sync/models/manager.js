@@ -23,6 +23,8 @@ const ManagerSchema = new Schema({
     },
     rosterType : { type : String, enum : ['weekly', 'monthly'], default : 'weekly' }, // controls how the roster UI groups shifts
     roles : { type : [String], default : [] },          // organisation-defined role labels available when inviting staff
+    orgDepartments : { type : [String], default : [] }, // org-wide list of team/department types; used when inviting staff and filtering the roster
+    departments : { type : [String], default : [] },    // departments this manager oversees; empty = catch-all (sees all swaps)
     pushSubscriptions : { type : [Schema.Types.Mixed], default : [] }  // array of Web Push subscriptions (one per browser/device)
 })
 

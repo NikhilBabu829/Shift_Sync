@@ -34,7 +34,7 @@ const { isAvailableForShift } = require('../services/availabilityService')
 
 // Creates a new manager account and organisation; hashes the password before storing
 exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
-    const { first_name, last_name, email, password, org_name, hq_lat, hq_lng, rosterType, roles } = req.body
+    const { first_name, last_name, email, password, org_name, hq_lat, hq_lng, rosterType, roles, orgDepartments } = req.body
     // Prevent duplicate accounts for the same email
     const check = await MANAGER.findOne({email : email})
     if(check){
@@ -61,7 +61,8 @@ exports.manager_sign_up = asyncHandler(async (req, res, next)=>{
                         : [],
                     // Default to weekly roster if an unrecognised type is submitted
                     rosterType : ['weekly', 'monthly'].includes(rosterType) ? rosterType : 'weekly',
-                    roles : Array.isArray(roles) ? roles.map(r => String(r).trim()).filter(Boolean) : []
+                    roles : Array.isArray(roles) ? roles.map(r => String(r).trim()).filter(Boolean) : [],
+                    orgDepartments : Array.isArray(orgDepartments) ? orgDepartments.map(d => String(d).trim()).filter(Boolean) : []
                 })
                 await manager.save()
                 res.status(200).json({"message" : "Organisation registered successfully", manager})
@@ -194,14 +195,38 @@ exports.resend_invitation = asyncHandler(async (req, res) => {
 // Returns all shifts in pending_swap status that have a swap partner, for manager review
 exports.getPendingSwaps = asyncHandler(async (req, res)=>{
     try{
-        const pendingSwaps = await SHIFT.find({status: 'pending_swap', swap_belongs_to: { $exists: true, $ne: null }})
-            .populate('belongs_to', 'staffName email')
-            .populate('swap_belongs_to', 'staffName email')
+        const manager = await MANAGER.findById(req.user.id).select('departments').lean()
+        const hasDepartments = manager && manager.departments && manager.departments.length > 0
+
+        // Managers with departments assigned only see their own swaps; catch-all managers see everything
+        const filter = hasDepartments
+            ? { status: 'pending_swap', swap_belongs_to: { $exists: true, $ne: null }, assigned_manager: req.user.id }
+            : { status: 'pending_swap', swap_belongs_to: { $exists: true, $ne: null } }
+
+        const pendingSwaps = await SHIFT.find(filter)
+            .populate('belongs_to', 'staffName email department')
+            .populate('swap_belongs_to', 'staffName email department')
             .lean()
         res.status(200).json({ pendingSwaps })
     } catch(err) {
         console.log(err)
         res.status(500).json({ message: "Server error retrieving pending swaps", err })
+    }
+})
+
+exports.updateManagerDepartments = asyncHandler(async (req, res) => {
+    try {
+        const { departments } = req.body
+        if (!Array.isArray(departments)) return res.status(400).json({ message: 'departments must be an array' })
+        const manager = await MANAGER.findByIdAndUpdate(
+            req.user.id,
+            { departments },
+            { new: true, select: 'departments' }
+        ).lean()
+        res.status(200).json({ departments: manager.departments })
+    } catch(err) {
+        console.log(err)
+        res.status(500).json({ message: 'Server error updating departments', err })
     }
 })
 
@@ -359,7 +384,7 @@ exports.getManagerStaff = asyncHandler(async (req, res) => {
 
 // Returns filled roster shifts optionally filtered by date range
 exports.getRoster = asyncHandler(async (req, res) => {
-    const { from, to } = req.query
+    const { from, to, department } = req.query
     // Exclude swap-side shifts so only the primary assigned shifts are shown
     const filter = { status: 'filled', swap_belongs_to: { $exists: false } }
     if (from || to) {
@@ -367,8 +392,12 @@ exports.getRoster = asyncHandler(async (req, res) => {
         if (from) filter.date.$gte = from
         if (to) filter.date.$lte = to
     }
+    if (department) {
+        const staffInDept = await STAFF.find({ department }, '_id').lean()
+        filter.belongs_to = { $in: staffInDept.map(s => s._id) }
+    }
     const roster = await SHIFT.find(filter)
-        .populate('belongs_to', 'staffName')
+        .populate('belongs_to', 'staffName department')
         .lean()
     return res.status(200).json({ roster })
 })
@@ -556,6 +585,35 @@ exports.removeOrgRole = asyncHandler(async (req, res) => {
         { new: true }
     ).select('roles')
     return res.status(200).json({ roles: manager?.roles || [], message: 'Role removed.' })
+})
+
+// Returns the org-wide list of team/department types
+exports.getOrgDepartments = asyncHandler(async (req, res) => {
+    const manager = await MANAGER.findById(req.user.id).select('orgDepartments')
+    return res.status(200).json({ departments: manager?.orgDepartments || [] })
+})
+
+// Appends a new department to the org's department list, rejecting duplicates
+exports.addOrgDepartment = asyncHandler(async (req, res) => {
+    const dept = String(req.body.department || '').trim()
+    if (!dept) return res.status(400).json({ message: 'Department name is required.' })
+    const manager = await MANAGER.findById(req.user.id).select('orgDepartments')
+    if (manager.orgDepartments.includes(dept)) return res.status(409).json({ message: 'Department already exists.' })
+    manager.orgDepartments.push(dept)
+    await manager.save()
+    return res.status(200).json({ departments: manager.orgDepartments, message: 'Department added.' })
+})
+
+// Removes a single department from the org's department list
+exports.removeOrgDepartment = asyncHandler(async (req, res) => {
+    const dept = String(req.body.department || '').trim()
+    if (!dept) return res.status(400).json({ message: 'Department name is required.' })
+    const manager = await MANAGER.findByIdAndUpdate(
+        req.user.id,
+        { $pull: { orgDepartments: dept } },
+        { new: true }
+    ).select('orgDepartments')
+    return res.status(200).json({ departments: manager?.orgDepartments || [], message: 'Department removed.' })
 })
 
 // Generates and streams an Excel attendance export filtered by date range and/or role

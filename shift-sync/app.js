@@ -16,6 +16,7 @@ const session = require('express-session')
 
 const APIRoutes = require('./routes/API')
 const { startClockOutReminderCron } = require('./utils/clockOutReminderCron')
+const { startMlRetrainCron } = require('./utils/mlRetrainCron')
 
 var app = express();
 const mongoose = require('mongoose')
@@ -66,6 +67,8 @@ mongoDbConnection().catch((err)=>{console.log(err)})
 
 // Start the 5-minute clock-out push reminder cron after DB connection is initiated
 startClockOutReminderCron()
+// Retrain the ML staff-ranker model every Sunday at midnight
+startMlRetrainCron()
 
 // Manager local strategy — verifies email and bcrypt-hashed password against the Manager collection
 passport.use("manager-local", new passportLocalStrategy({ usernameField : 'email', passwordField : 'password'}, async (email, pass, done)=>{

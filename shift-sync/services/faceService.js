@@ -5,7 +5,9 @@
  */
 
 // Distance below this value means the two face descriptors belong to the same person
-const FACE_MATCH_THRESHOLD = 0.4   // standard face-api.js threshold for a positive match
+const FACE_MATCH_THRESHOLD = 0.4   // hard cutoff — above this is a mismatch
+// Below this distance the match is considered confident enough to clock in without interruption
+const FACE_STRONG_THRESHOLD = 0.35  // 0.35–0.4 = matched but weak, ask to re-clock
 
 /**
  * Calculates the Euclidean distance between two 128-dimensional face descriptors.
@@ -24,8 +26,9 @@ function euclideanDistance(a, b) {
 function verifyFace(storedDescriptor, incomingDescriptor) {
     const distance = euclideanDistance(storedDescriptor, incomingDescriptor)
     return {
-        isVerified : distance < FACE_MATCH_THRESHOLD,
-        distance   : parseFloat(distance.toFixed(4))
+        isVerified    : distance < FACE_MATCH_THRESHOLD,
+        isStrongMatch : distance < FACE_STRONG_THRESHOLD,
+        distance      : parseFloat(distance.toFixed(4))
     }
 }
 

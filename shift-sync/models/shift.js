@@ -15,6 +15,7 @@ const ShiftSchema = new Schema({
     swap_shift_length : {type : Number},                            // the swap partner's shift duration in fractional hours
     status : {type : String, enum : ['pending_swap', 'pending_cover', 'open_cover', 'filled', 'approved'], default : 'pending_swap'}, // lifecycle state of the shift
     requiredRole : {type : String, default : 'staff'},              // role required to cover this shift (used by Smart Match)
+    assigned_manager : {type : Schema.Types.ObjectId, ref : 'Manager', default : null}, // manager assigned to review this swap
     shiftDate : {type : Date},                                      // Date object duplicate of date; used for date-comparison queries
     googleCalendarEventId : {type : String}                         // Google Calendar event id; stored so the event can be deleted when the shift is removed
 })
